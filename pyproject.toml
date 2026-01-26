@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chromaforge"
+version = "0.1.0"
+description = "Image-derived 3D LUT generation tool"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "numba>=0.57",
+    "colour-science>=0.4.2",
+    "typer>=0.9",
+    "rich>=13.0",
+    "imageio>=2.31",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.5",
+]
+oiio = [
+    "OpenImageIO>=2.4",
+]
+ocio = [
+    "PyOpenColorIO>=2.2",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+chromaforge = "chromaforge.cli.app:main"
+
+[project.gui-scripts]
+chromaforge-gui = "chromaforge.gui.app:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chromaforge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
