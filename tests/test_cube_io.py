@@ -49,6 +49,20 @@ class TestCubeRoundTrip:
         np.testing.assert_allclose(meta["domain_min"], list(dmin))
         np.testing.assert_allclose(meta["domain_max"], list(dmax))
 
+    def test_shaper_roundtrip(self, tmp_cube_path):
+        """1D shaper data should round-trip when present."""
+        N = 3
+        lut = identity_lut(N)
+        shaper = np.linspace(0.0, 1.0, 4, dtype=np.float32)
+        shaper = np.stack([shaper, shaper, shaper], axis=-1)
+
+        write_cube(tmp_cube_path, lut, shaper=shaper)
+        lut_read, meta = read_cube(tmp_cube_path)
+
+        np.testing.assert_allclose(lut_read, lut, atol=1e-5)
+        assert meta["shaper_1d"] is not None
+        np.testing.assert_allclose(meta["shaper_1d"], shaper, atol=1e-6)
+
 
 class TestCubeOrdering:
     """Tests for correct R-fastest data ordering."""

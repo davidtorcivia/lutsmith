@@ -131,22 +131,43 @@ def compute_clip_penalty(rgb: np.ndarray) -> float:
 
 def compute_sample_weights(
     bins: list[BinStatistics],
-    config: PipelineConfig,
+    config: PipelineConfig | None = None,
+    shadow_lum_thresh: float | None = None,
 ) -> np.ndarray:
     """Compute per-sample weights for the regression.
 
     Args:
         bins: List of bin statistics.
         config: Pipeline config.
+        shadow_lum_thresh: Luminance threshold for shadow weighting.
 
     Returns:
         (M,) array of weights, one per bin/sample.
     """
+    if config is None:
+        config = PipelineConfig()
+
     M = len(bins)
     weights = np.ones(M, dtype=np.float64)
-    k = 0.5  # Variance sensitivity
+
+    # Variance sensitivity: aggressive in shadows where noisy bins
+    # (e.g. from diffusion artifacts, JPEG compression) cause per-channel
+    # divergence in the solved LUT.
+    k_bright = 0.5
+    k_shadow = 10.0
+    if shadow_lum_thresh is None:
+        shadow_lum_thresh = 0.25
 
     for i, b in enumerate(bins):
+        # Luminance-aware variance sensitivity
+        lum = float(
+            0.2126 * b.mean_input[0]
+            + 0.7152 * b.mean_input[1]
+            + 0.0722 * b.mean_input[2]
+        )
+        t = min(max(lum / shadow_lum_thresh, 0.0), 1.0)
+        k = k_bright * t + k_shadow * (1.0 - t)
+
         # Confidence from variance and count
         var_mag = float(np.mean(b.variance))
         count_factor = min(1.0, b.count / max(config.min_samples_per_bin, 1))
@@ -213,3 +234,23 @@ def bins_to_samples(
         output_rgb[i] = b.mean_output
 
     return input_rgb, output_rgb, weights
+
+
+def occupied_lut_indices(
+    input_rgb: np.ndarray,
+    lut_size: int,
+) -> np.ndarray:
+    """Compute occupied LUT node indices from input samples.
+
+    Uses the same flat indexing convention (R fastest).
+    """
+    if len(input_rgb) == 0:
+        return np.array([], dtype=np.int64)
+
+    scaled = np.clip(input_rgb, 0.0, 1.0) * (lut_size - 1)
+    idx = np.minimum(scaled.astype(np.int64), lut_size - 1)
+    r = idx[:, 0]
+    g = idx[:, 1]
+    b = idx[:, 2]
+    flat = b * lut_size * lut_size + g * lut_size + r
+    return np.unique(flat)

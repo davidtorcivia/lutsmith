@@ -77,8 +77,41 @@ def extract(
     title: str = typer.Option("ChromaForge LUT", "--title", help="LUT title."),
     refine: bool = typer.Option(False, "--refine", help="Enable iterative refinement."),
     format: str = typer.Option("cube", "-f", "--format", help="Output format (cube, aml, alf4)."),
+    shadow_auto: bool = typer.Option(
+        True,
+        "--shadow-auto/--shadow-manual",
+        help="Use adaptive shadow thresholds for smoothing/weighting.",
+    ),
+    shadow_threshold: Optional[float] = typer.Option(
+        None,
+        "--shadow-threshold",
+        min=0.0,
+        max=1.0,
+        help="Shadow smoothing threshold (0-1). Overrides auto if set.",
+    ),
+    deep_shadow_threshold: Optional[float] = typer.Option(
+        None,
+        "--deep-shadow-threshold",
+        min=0.0,
+        max=1.0,
+        help="Deep shadow threshold (0-1). Overrides auto if set.",
+    ),
+    shaper: str = typer.Option(
+        "auto",
+        "--shaper",
+        help="1D shaper LUT: auto, on, or off.",
+    ),
 ):
     """Extract a 3D LUT from a source/target image pair."""
+    shaper_mode = shaper.strip().lower()
+    if shaper_mode not in {"auto", "on", "off"}:
+        raise typer.BadParameter("Shaper must be one of: auto, on, off.")
+    include_shaper = None
+    if shaper_mode == "on":
+        include_shaper = True
+    elif shaper_mode == "off":
+        include_shaper = False
+
     config = PipelineConfig(
         source_path=source,
         target_path=target,
@@ -94,6 +127,10 @@ def extract(
         title=title,
         enable_refinement=refine,
         format=ExportFormat(format),
+        include_shaper=include_shaper,
+        shadow_auto=shadow_auto,
+        shadow_threshold=shadow_threshold,
+        deep_shadow_threshold=deep_shadow_threshold,
     )
 
     from chromaforge.pipeline.runner import run_pipeline

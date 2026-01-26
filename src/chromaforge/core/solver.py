@@ -171,6 +171,8 @@ def solve_per_channel(
     occupied_flat_indices: Optional[np.ndarray] = None,
     distance_scale: float = 3.0,
     parallel: bool = True,
+    shadow_threshold: float | None = None,
+    deep_threshold: float | None = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """Solve the LUT regression independently for each RGB channel.
 
@@ -191,6 +193,8 @@ def solve_per_channel(
         occupied_flat_indices: Flat indices of occupied bins.
         distance_scale: Prior strength distance scale.
         parallel: Whether to solve channels in parallel threads.
+        shadow_threshold: Upper luminance boundary for shadow smoothness boost.
+        deep_threshold: Luminance boundary for maximum smoothness boost.
 
     Returns:
         (lut, infos): (N, N, N, 3) LUT array and list of 3 solver info dicts.
@@ -202,7 +206,11 @@ def solve_per_channel(
     corner_indices, corner_weights = compute_interpolation_weights(input_rgb, N, kernel)
 
     logger.info("Building smoothness matrix (N=%d)...", N)
-    laplacian_cached = build_smoothness_matrix(N, lambda_s)
+    laplacian_cached = build_smoothness_matrix(
+        N, lambda_s,
+        shadow_threshold=shadow_threshold,
+        deep_threshold=deep_threshold,
+    )
 
     logger.info("Computing distance-to-data...")
     if occupied_flat_indices is not None:

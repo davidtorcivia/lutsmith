@@ -73,12 +73,13 @@ class TestImageDimensions:
         assert np.all(np.isfinite(result))
 
     def test_sanitize_negative(self):
-        """Negative values should be clamped to 0."""
+        """Negative values should be preserved."""
         from chromaforge.pipeline.preprocess import sanitize_image
 
         img = np.array([[[-0.5, 0.5, 0.5]]], dtype=np.float32)
         result = sanitize_image(img)
-        assert result.min() >= 0.0
+        assert result.min() < 0.0
+        assert np.isclose(result.min(), -0.5)
 
 
 class TestCubeFileSecurity:

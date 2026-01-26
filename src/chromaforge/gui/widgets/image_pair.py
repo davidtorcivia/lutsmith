@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 
 try:
-    from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+    from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSettings
     from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QWheelEvent, QMouseEvent
     from PySide6.QtWidgets import (
         QWidget, QHBoxLayout, QVBoxLayout, QGraphicsView,
@@ -140,11 +140,14 @@ class ImagePairViewer(QWidget):
         layout.addLayout(controls)
 
     def _load_source(self):
+        settings = QSettings("ChromaForge", "ChromaForge")
+        last_dir = settings.value("last_image_dir", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Source Image", "",
+            self, "Select Source Image", last_dir,
             "Images (*.png *.tiff *.tif *.exr *.jpg *.jpeg *.bmp *.dpx *.hdr)"
         )
         if path:
+            settings.setValue("last_image_dir", str(Path(path).parent))
             self._source_path = Path(path)
             self._display_image(path, self._source_scene)
             self._source_label.setText(f"Source: {Path(path).name}")
@@ -152,11 +155,14 @@ class ImagePairViewer(QWidget):
             self.source_loaded.emit(path)
 
     def _load_target(self):
+        settings = QSettings("ChromaForge", "ChromaForge")
+        last_dir = settings.value("last_image_dir", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Target Image", "",
+            self, "Select Target Image", last_dir,
             "Images (*.png *.tiff *.tif *.exr *.jpg *.jpeg *.bmp *.dpx *.hdr)"
         )
         if path:
+            settings.setValue("last_image_dir", str(Path(path).parent))
             self._target_path = Path(path)
             self._display_image(path, self._target_scene)
             self._target_label.setText(f"Target: {Path(path).name}")

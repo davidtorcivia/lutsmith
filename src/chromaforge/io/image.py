@@ -19,7 +19,7 @@ from chromaforge.config import (
     MAX_IMAGE_DIMENSION,
     MAX_IMAGE_PIXELS,
 )
-from chromaforge.errors import ImageDimensionError, ImageFormatError
+from chromaforge.errors import ImageDimensionError, ImageFormatError, ImageError
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +51,16 @@ def validate_input_path(filepath: str | Path) -> Path:
         Resolved Path object.
 
     Raises:
-        FileNotFoundError: If file does not exist.
+        ImageError: If file does not exist or is not a regular file.
         ImageFormatError: If extension is not allowed.
     """
     path = Path(filepath).resolve()
 
     if not path.exists():
-        raise FileNotFoundError(f"Input file not found: {path}")
+        raise ImageError(f"Input file not found: {path}")
 
     if not path.is_file():
-        raise ImageFormatError(f"Not a regular file: {path}")
+        raise ImageError(f"Not a regular file: {path}")
 
     if path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise ImageFormatError(
@@ -81,16 +81,16 @@ def validate_output_path(filepath: str | Path) -> Path:
         Resolved Path object.
 
     Raises:
-        FileNotFoundError: If parent directory does not exist.
+        ImageError: If parent directory does not exist or is not writable.
     """
     import os
     path = Path(filepath).resolve()
 
     if not path.parent.exists():
-        raise FileNotFoundError(f"Output directory does not exist: {path.parent}")
+        raise ImageError(f"Output directory does not exist: {path.parent}")
 
     if not os.access(path.parent, os.W_OK):
-        raise PermissionError(f"Cannot write to directory: {path.parent}")
+        raise ImageError(f"Cannot write to directory: {path.parent}")
 
     return path
 

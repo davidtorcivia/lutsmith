@@ -61,10 +61,11 @@ def srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
         (..., 3) Oklab values (L, a, b).
     """
     # Linearize sRGB
+    rgb_clipped = np.clip(rgb, 0.0, 1.0)
     linear = np.where(
-        rgb <= 0.04045,
-        rgb / 12.92,
-        ((np.clip(rgb, 0, None) + 0.055) / 1.055) ** 2.4,
+        rgb_clipped <= 0.04045,
+        rgb_clipped / 12.92,
+        ((rgb_clipped + 0.055) / 1.055) ** 2.4,
     )
 
     # Linear sRGB -> LMS (Oklab matrix)
@@ -88,10 +89,11 @@ def srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
 def _srgb_to_lab_builtin(rgb: np.ndarray) -> np.ndarray:
     """Built-in sRGB -> CIELAB conversion (no dependencies)."""
     # Linearize sRGB
+    rgb_clipped = np.clip(rgb, 0.0, 1.0)
     linear = np.where(
-        rgb <= 0.04045,
-        rgb / 12.92,
-        ((np.clip(rgb, 0, None) + 0.055) / 1.055) ** 2.4,
+        rgb_clipped <= 0.04045,
+        rgb_clipped / 12.92,
+        ((rgb_clipped + 0.055) / 1.055) ** 2.4,
     )
 
     # sRGB -> XYZ (D65)

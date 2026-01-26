@@ -9,6 +9,8 @@ from typing import Optional
 
 import numpy as np
 
+from scipy.ndimage import gaussian_filter
+
 from chromaforge.config import LUT_CLAMP_MIN, LUT_CLAMP_MAX
 from chromaforge.core.interpolation import apply_lut_to_colors
 from chromaforge.core.types import LUTData, InterpolationKernel
@@ -94,6 +96,146 @@ def clip_lut(
         Clipped copy.
     """
     return np.clip(lut, lo, hi)
+
+
+def _smoothstep(x: np.ndarray) -> np.ndarray:
+    """Hermite smoothstep: 0 at x<=0, 1 at x>=1, smooth in between."""
+    t = np.clip(x, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def estimate_shadow_thresholds(
+    input_rgb: np.ndarray,
+    base_shadow: float = 0.25,
+    base_deep: float = 0.08,
+    shadow_percentile: float = 30.0,
+    deep_percentile: float = 10.0,
+    min_gap: float = 0.02,
+    max_shadow: float = 0.6,
+) -> tuple[float, float, dict]:
+    """Estimate shadow smoothing thresholds from input samples.
+
+    Uses luminance percentiles to adapt thresholds for low-contrast
+    or log-like inputs, while preserving default behavior otherwise.
+
+    Returns:
+        (shadow_threshold, deep_threshold, info)
+    """
+    if input_rgb is None or input_rgb.size == 0:
+        return base_shadow, base_deep, {
+            "auto_applied": False,
+            "reason": "no_samples",
+        }
+
+    lum = (
+        0.2126 * input_rgb[..., 0]
+        + 0.7152 * input_rgb[..., 1]
+        + 0.0722 * input_rgb[..., 2]
+    )
+    lum = lum[np.isfinite(lum)]
+    if lum.size == 0:
+        return base_shadow, base_deep, {
+            "auto_applied": False,
+            "reason": "non_finite",
+        }
+
+    p99 = float(np.percentile(lum, 99))
+    mean = float(np.mean(lum))
+    info = {"p99": p99, "mean": mean}
+
+    # Heuristic: compressed/log-like inputs have low highlights and mid-heavy means.
+    compressed = (p99 < 0.9) and (0.05 < mean < 0.6)
+    if not compressed:
+        info["auto_applied"] = False
+        return base_shadow, base_deep, info
+
+    p_deep = float(np.percentile(lum, deep_percentile))
+    p_shadow = float(np.percentile(lum, shadow_percentile))
+
+    deep = max(base_deep, p_deep)
+    shadow = max(base_shadow, p_shadow)
+
+    shadow = min(shadow, max_shadow)
+    if shadow <= deep + min_gap:
+        shadow = min(max_shadow, deep + min_gap)
+    deep = min(deep, shadow - min_gap)
+
+    deep = float(np.clip(deep, 0.0, 1.0))
+    shadow = float(np.clip(shadow, 0.0, 1.0))
+
+    info.update({
+        "auto_applied": True,
+        "p_deep": p_deep,
+        "p_shadow": p_shadow,
+        "shadow_percentile": shadow_percentile,
+        "deep_percentile": deep_percentile,
+    })
+
+    return shadow, deep, info
+
+
+def smooth_lut_shadows(
+    lut: np.ndarray,
+    N: int,
+    shadow_threshold: float = 0.25,
+    deep_threshold: float = 0.08,
+) -> np.ndarray:
+    """Apply graduated 3D spatial smoothing to the shadow region of a LUT.
+
+    Uses a two-tier approach: heavy blur for deep shadows (where solver
+    data is sparsest and noisiest), moderate blur for mid-shadows, and
+    no smoothing above the shadow threshold.
+
+    The deep-shadow blur is applied as two consecutive passes (effective
+    sigma ~ sigma * sqrt(2)) to reach further without an enormous kernel,
+    suppressing per-node noise that causes RGB channel divergence on
+    waveform monitors.
+
+    Args:
+        lut: (N, N, N, 3) LUT array.
+        N: Grid size per axis.
+        shadow_threshold: Upper luminance boundary of the shadow region.
+            Nodes above this are not smoothed.
+        deep_threshold: Luminance boundary between deep and mid shadows.
+            Below this, the strongest blur applies.
+
+    Returns:
+        (N, N, N, 3) LUT with smoothed shadows.
+    """
+    # Deep-shadow blur: two passes of sigma=3.0 (effective ~4.2)
+    sigma_deep = 3.0
+    # Mid-shadow blur: single pass
+    sigma_mid = 1.5
+
+    blurred_deep = np.empty_like(lut)
+    blurred_mid = np.empty_like(lut)
+    for ch in range(3):
+        # Two-pass blur for deep shadows — stronger smoothing
+        first = gaussian_filter(lut[..., ch], sigma=sigma_deep)
+        blurred_deep[..., ch] = gaussian_filter(first, sigma=sigma_deep)
+        blurred_mid[..., ch] = gaussian_filter(lut[..., ch], sigma=sigma_mid)
+
+    # Input-space luminance grid (stable regardless of the grade)
+    coords = np.linspace(0.0, 1.0, N, dtype=np.float32)
+    ri, gi, bi = np.meshgrid(coords, coords, coords, indexing="ij")
+    luminance = 0.2126 * ri + 0.7152 * gi + 0.0722 * bi
+
+    # Tier 1 blend: deep vs mid smoothed
+    # 0 = deep (strong blur), 1 = mid (moderate blur)
+    t_deep = _smoothstep(luminance / max(deep_threshold, 1e-8))
+    smoothed = (blurred_deep * (1.0 - t_deep[..., np.newaxis])
+                + blurred_mid * t_deep[..., np.newaxis])
+
+    # Tier 2 blend: smoothed vs original
+    # 0 = shadow (use smoothed), 1 = bright (keep original)
+    t_shadow = _smoothstep(
+        (luminance - deep_threshold)
+        / max(shadow_threshold - deep_threshold, 1e-8)
+    )
+    result = (smoothed * (1.0 - t_shadow[..., np.newaxis])
+              + lut * t_shadow[..., np.newaxis])
+
+    return result.astype(np.float32)
 
 
 def lut_stats(lut: np.ndarray) -> dict:

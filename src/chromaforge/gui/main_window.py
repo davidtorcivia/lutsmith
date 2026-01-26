@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 from typing import Optional
 
 try:
-    from PySide6.QtCore import Qt, Slot
+    from PySide6.QtCore import Qt, Slot, QSettings
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
         QMainWindow, QTabWidget, QWidget,
@@ -15,7 +16,7 @@ try:
         QFileDialog, QMessageBox, QStatusBar,
         QPushButton, QLabel, QGroupBox,
         QFormLayout, QLineEdit, QSpinBox,
-        QComboBox, QCheckBox,
+        QComboBox, QCheckBox, QScrollArea, QFrame,
     )
 except ImportError:
     raise ImportError("PySide6 is required for the GUI.")
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 720)
         self.resize(1400, 860)
 
+        self._settings = QSettings("ChromaForge", "ChromaForge")
         self._worker: Optional[PipelineWorker] = None
         self._hald_worker: Optional[HaldWorker] = None
         self._source_path: Optional[Path] = None
@@ -104,11 +106,21 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left)
 
-        # Right: Parameters + metrics + coverage + action buttons
+        # Right: Parameters + metrics + coverage + action buttons (scrollable)
         right = QWidget()
         right.setMaximumWidth(380)
         right.setMinimumWidth(280)
-        right_layout = QVBoxLayout(right)
+        right_outer = QVBoxLayout(right)
+        right_outer.setContentsMargins(0, 0, 0, 0)
+        right_outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        scroll_content = QWidget()
+        right_layout = QVBoxLayout(scroll_content)
         right_layout.setContentsMargins(0, SPACING_SM, SPACING_SM, SPACING_SM)
         right_layout.setSpacing(SPACING_SM)
 
@@ -121,8 +133,14 @@ class MainWindow(QMainWindow):
         self._coverage = CoverageViewer()
         right_layout.addWidget(self._coverage)
 
-        # Action buttons
+        right_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        right_outer.addWidget(scroll, 1)
+
+        # Action buttons (outside scroll, always visible)
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, SPACING_SM, SPACING_SM, SPACING_SM)
         btn_row.setSpacing(SPACING_SM)
 
         self._btn_extract = QPushButton("Extract LUT")
@@ -138,7 +156,7 @@ class MainWindow(QMainWindow):
         self._btn_cancel.setToolTip("Cancel running extraction")
         btn_row.addWidget(self._btn_cancel)
 
-        right_layout.addLayout(btn_row)
+        right_outer.addLayout(btn_row)
 
         splitter.addWidget(right)
         splitter.setSizes([700, 350])
@@ -298,6 +316,10 @@ class MainWindow(QMainWindow):
         self._btn_extract.clicked.connect(self._start_extraction)
         self._btn_cancel.clicked.connect(self._cancel_extraction)
 
+        # Image viewer load buttons
+        self._image_viewer.source_loaded.connect(self._on_viewer_source_loaded)
+        self._image_viewer.target_loaded.connect(self._on_viewer_target_loaded)
+
         # Hald tab
         self._btn_gen_hald.clicked.connect(self._generate_hald_identity)
         self._btn_browse_hald.clicked.connect(self._browse_hald_input)
@@ -313,21 +335,23 @@ class MainWindow(QMainWindow):
     def _open_image(self, role: str):
         """Open file dialog to load a source or target image."""
         caption = f"Open {'Source' if role == 'source' else 'Target'} Image"
+        last_dir = self._settings.value("last_image_dir", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, caption, "",
+            self, caption, last_dir,
             "Images (*.png *.jpg *.jpeg *.tiff *.tif *.exr *.dpx *.hdr);;All Files (*)",
         )
         if not path:
             return
 
+        self._settings.setValue("last_image_dir", str(Path(path).parent))
         p = Path(path)
         if role == "source":
             self._source_path = p
-            self._image_viewer.load_source(str(p))
+            self._image_viewer.set_source(str(p))
             self._log.append(f"Source loaded: {p.name}", "info")
         else:
             self._target_path = p
-            self._image_viewer.load_target(str(p))
+            self._image_viewer.set_target(str(p))
             self._log.append(f"Target loaded: {p.name}", "info")
 
         # Enable extract button when both images loaded
@@ -335,6 +359,26 @@ class MainWindow(QMainWindow):
             self._source_path is not None and self._target_path is not None
         )
         self._status_label.setText(f"Loaded: {p.name}")
+
+    @Slot(str)
+    def _on_viewer_source_loaded(self, path: str):
+        """Handle source image loaded via the ImagePairViewer buttons."""
+        self._source_path = Path(path)
+        self._log.append(f"Source loaded: {self._source_path.name}", "info")
+        self._btn_extract.setEnabled(
+            self._source_path is not None and self._target_path is not None
+        )
+        self._status_label.setText(f"Loaded: {self._source_path.name}")
+
+    @Slot(str)
+    def _on_viewer_target_loaded(self, path: str):
+        """Handle target image loaded via the ImagePairViewer buttons."""
+        self._target_path = Path(path)
+        self._log.append(f"Target loaded: {self._target_path.name}", "info")
+        self._btn_extract.setEnabled(
+            self._source_path is not None and self._target_path is not None
+        )
+        self._status_label.setText(f"Loaded: {self._target_path.name}")
 
     # ------------------------------------------------------------------
     # Pipeline execution
@@ -348,6 +392,13 @@ class MainWindow(QMainWindow):
 
         # Build config from parameter panel
         config = self._build_config()
+
+        if config.include_shaper is True and config.format != ExportFormat.CUBE:
+            self._log.append(
+                "Shaper requested, but only .cube export supports 1D shapers. "
+                "Shaper will not be exported.",
+                "warning",
+            )
 
         self._log.append_separator()
         self._progress.reset()
@@ -371,14 +422,31 @@ class MainWindow(QMainWindow):
         output_dir = self._output_dir.text() or "."
         fmt_str = self._params.get_format_string()
         ext = {"cube": ".cube", "aml": ".aml", "alf4": ".alf4"}.get(fmt_str, ".cube")
-        output_path = Path(output_dir) / f"output{ext}"
+        output_path, resolved_title = self._resolve_output_path_and_title(
+            output_dir,
+            self._output_title.text(),
+            ext,
+            "ChromaForge LUT",
+        )
+        shaper_text = self._params.shaper_mode.currentText()
+        include_shaper = None
+        if shaper_text == "on":
+            include_shaper = True
+        elif shaper_text == "off":
+            include_shaper = False
+        shadow_auto = self._params.shadow_auto.isChecked()
+        shadow_threshold = None
+        deep_shadow_threshold = None
+        if not shadow_auto:
+            shadow_threshold = self._params.shadow_threshold.value()
+            deep_shadow_threshold = self._params.deep_shadow_threshold.value()
 
         return PipelineConfig(
             source_path=self._source_path,
             target_path=self._target_path,
             output_path=output_path,
             format=ExportFormat(fmt_str),
-            title=self._output_title.text() or "ChromaForge LUT",
+            title=resolved_title,
             lut_size=int(self._params.lut_size.currentText()),
             smoothness=self._params.smoothness.value(),
             prior_strength=self._params.prior_strength.value(),
@@ -389,6 +457,10 @@ class MainWindow(QMainWindow):
             irls_iterations=self._params.irls_iter.value(),
             transfer_function=TransferFunction(self._params.transfer_fn.currentText()),
             enable_refinement=self._params.enable_refine.isChecked(),
+            include_shaper=include_shaper,
+            shadow_auto=shadow_auto,
+            shadow_threshold=shadow_threshold,
+            deep_shadow_threshold=deep_shadow_threshold,
         )
 
     @Slot()
@@ -445,13 +517,17 @@ class MainWindow(QMainWindow):
         """Generate and save a Hald identity image."""
         level = self._hald_level.value()
 
+        last_out = self._settings.value("last_output_dir", "")
+        default_name = Path(last_out) / f"hald_identity_L{level}.tiff" if last_out else f"hald_identity_L{level}.tiff"
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Hald Identity Image",
-            f"hald_identity_L{level}.tiff",
+            str(default_name),
             "TIFF (*.tiff *.tif);;PNG (*.png)",
         )
         if not path:
             return
+
+        self._settings.setValue("last_output_dir", str(Path(path).parent))
 
         try:
             from chromaforge.hald.identity import (
@@ -483,11 +559,13 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _browse_hald_input(self):
+        last_dir = self._settings.value("last_image_dir", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Processed Hald Image", "",
+            self, "Open Processed Hald Image", last_dir,
             "Images (*.png *.jpg *.jpeg *.tiff *.tif *.exr);;All Files (*)",
         )
         if path:
+            self._settings.setValue("last_image_dir", str(Path(path).parent))
             self._hald_processed_path.setText(path)
 
     @Slot()
@@ -497,7 +575,12 @@ class MainWindow(QMainWindow):
             return
 
         out_dir = self._output_dir.text() or "."
-        output_path = Path(out_dir) / "hald_output.cube"
+        output_path, resolved_title = self._resolve_output_path_and_title(
+            out_dir,
+            self._output_title.text(),
+            ".cube",
+            "ChromaForge Hald LUT",
+        )
 
         level = self._hald_level.value()
         target_size = self._hald_target_size.value()
@@ -510,7 +593,7 @@ class MainWindow(QMainWindow):
             output_path=output_path,
             level=level,
             target_size=target_size,
-            title=self._output_title.text() or "ChromaForge Hald LUT",
+            title=resolved_title,
             parent=self,
         )
         self._hald_worker.log_message.connect(
@@ -537,9 +620,56 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _browse_output_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        last_out = self._settings.value("last_output_dir", "")
+        d = QFileDialog.getExistingDirectory(self, "Select Output Directory", last_out)
         if d:
+            self._settings.setValue("last_output_dir", d)
             self._output_dir.setText(d)
+
+    def _sanitize_title_for_filename(self, title: str, fallback: str) -> str:
+        """Return a filesystem-safe title for output naming."""
+        candidate = (title or "").strip()
+        if not candidate:
+            candidate = fallback
+        candidate = re.sub(r'[<>:"/\\\\|?*]', "_", candidate)
+        candidate = candidate.strip()
+        if not candidate:
+            candidate = fallback
+        return candidate
+
+    def _resolve_output_path_and_title(
+        self,
+        output_dir: str,
+        title: str,
+        ext: str,
+        fallback_title: str,
+    ) -> tuple[Path, str]:
+        """Resolve a unique output path and matching title."""
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        safe_title = self._sanitize_title_for_filename(title, fallback_title)
+        if safe_title.lower().endswith(ext.lower()):
+            safe_title = safe_title[: -len(ext)].strip()
+
+        out_dir = Path(output_dir) if output_dir else Path(".")
+        candidate = out_dir / f"{safe_title}{ext}"
+        if not candidate.exists():
+            return candidate, safe_title
+
+        match = re.match(r"^(.*?)(\d+)$", safe_title)
+        if match:
+            base = match.group(1)
+            num = int(match.group(2))
+        else:
+            base = safe_title
+            num = 0
+
+        while True:
+            num += 1
+            new_stem = f"{base}{num}"
+            candidate = out_dir / f"{new_stem}{ext}"
+            if not candidate.exists():
+                return candidate, new_stem
 
     def _detect_io_backend(self):
         """Detect available image I/O backends."""

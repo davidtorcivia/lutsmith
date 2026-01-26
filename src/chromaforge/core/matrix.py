@@ -19,7 +19,7 @@ CRITICAL: Rows are scaled by sqrt(weight), not weight, for proper LSQ.
 from __future__ import annotations
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, vstack
+from scipy.sparse import coo_matrix, csr_matrix, diags, vstack
 
 from chromaforge.core.interpolation import vectorized_trilinear, vectorized_tetrahedral
 from chromaforge.core.laplacian import build_laplacian_vectorized
@@ -112,20 +112,71 @@ def build_data_rhs(
 def build_smoothness_matrix(
     N: int,
     lambda_s: float,
+    shadow_threshold: float | None = None,
+    deep_threshold: float | None = None,
+    shadow_boost: float | None = None,
 ) -> tuple[csr_matrix, np.ndarray]:
     """Build the smoothness (Laplacian) part of the system.
+
+    When shadow_threshold is provided, applies per-node weighting so that
+    shadow-region LUT nodes get stronger Laplacian regularization. This
+    suppresses noise in dark areas where sample data is sparse, without
+    the crush artifacts that post-solve Gaussian blur causes.
 
     Args:
         N: LUT grid size.
         lambda_s: Smoothness regularization strength.
+        shadow_threshold: Upper luminance boundary of the shadow region.
+            Nodes above this get standard smoothness. None = uniform.
+        deep_threshold: Luminance boundary below which maximum boost applies.
+            Between deep and shadow threshold, boost ramps down smoothly.
+        shadow_boost: Maximum smoothness multiplier for deep-shadow nodes.
 
     Returns:
         (matrix, rhs): CSR matrix (N^3, N^3) and zero RHS (N^3,).
     """
+    from chromaforge.config import DEFAULT_SHADOW_SMOOTH_BOOST
+
     L = build_laplacian_vectorized(N)
-    sqrt_ls = np.sqrt(max(lambda_s, 0.0))
-    A_smooth = sqrt_ls * L
-    b_smooth = np.zeros(N ** 3, dtype=np.float64)
+    total = N ** 3
+
+    if shadow_threshold is not None and shadow_threshold > 0:
+        if shadow_boost is None:
+            shadow_boost = DEFAULT_SHADOW_SMOOTH_BOOST
+
+        # Compute input-space luminance for each flat-index node.
+        # Flat convention: flat = b*N*N + g*N + r
+        flat = np.arange(total, dtype=np.float64)
+        node_r = (flat % N) / max(N - 1, 1)
+        node_g = ((flat // N) % N) / max(N - 1, 1)
+        node_b = (flat // (N * N)) / max(N - 1, 1)
+        luminance = 0.2126 * node_r + 0.7152 * node_g + 0.0722 * node_b
+
+        if deep_threshold is not None and deep_threshold > 0:
+            # Two-tier ramp: max boost below deep_threshold,
+            # smooth ramp from boost→1.0 between deep and shadow thresholds,
+            # 1.0 above shadow_threshold.
+            range_width = max(shadow_threshold - deep_threshold, 1e-8)
+            t = np.clip((luminance - deep_threshold) / range_width, 0.0, 1.0)
+        else:
+            # Single ramp from 0 to shadow_threshold
+            t = np.clip(luminance / max(shadow_threshold, 1e-8), 0.0, 1.0)
+
+        # Hermite smoothstep for smooth transition
+        t = t * t * (3.0 - 2.0 * t)
+
+        # boost: shadow_boost at t=0 (dark), 1.0 at t=1 (bright)
+        boost = shadow_boost * (1.0 - t) + t
+
+        # Scale each row of L by sqrt(lambda_s * boost[j])
+        per_node_weight = np.sqrt(np.maximum(lambda_s, 0.0) * boost)
+        A_smooth = diags(per_node_weight) @ L
+    else:
+        # Uniform smoothness (original behavior)
+        sqrt_ls = np.sqrt(max(lambda_s, 0.0))
+        A_smooth = sqrt_ls * L
+
+    b_smooth = np.zeros(total, dtype=np.float64)
     return A_smooth, b_smooth
 
 

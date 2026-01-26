@@ -29,7 +29,7 @@ DEFAULT_FORMAT = "cube"
 
 # --- Numerical safety ---
 EPSILON = 1e-8  # Division-by-zero guard
-CLIP_PENALTY_LOW = 0.02  # Near-black threshold
+CLIP_PENALTY_LOW = 0.05  # Near-black threshold
 CLIP_PENALTY_HIGH = 0.98  # Near-white threshold
 LUT_CLAMP_MIN = -0.5  # Post-solve LUT clamp range
 LUT_CLAMP_MAX = 1.5
@@ -47,6 +47,9 @@ DEFAULT_HALD_LEVEL = 8  # 512x512 image, 64^3 LUT
 VALIDATION_SUBSAMPLE_FRACTION = 0.1  # Use 10% of samples for DeltaE
 COVERAGE_DENSE_THRESHOLD = 2  # Grid steps
 COVERAGE_SPARSE_THRESHOLD = 5
+
+# --- Shadow smoothness boost ---
+DEFAULT_SHADOW_SMOOTH_BOOST = 10.0  # Laplacian weight multiplier for deep-shadow nodes
 
 # --- Prior strength falloff ---
 PRIOR_DISTANCE_SCALE = 3.0  # Distance at which prior strength is ~63% of max

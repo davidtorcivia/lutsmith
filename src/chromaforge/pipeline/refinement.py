@@ -27,6 +27,8 @@ def refine_lut(
     config: PipelineConfig,
     occupied_flat_indices: Optional[np.ndarray] = None,
     max_iterations: int = 2,
+    shadow_threshold: float | None = None,
+    deep_threshold: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Iteratively refine the LUT by detecting and downweighting outliers.
 
@@ -120,8 +122,13 @@ def refine_lut(
         )
 
         current_lut, _ = solve_lut(
-            input_rgb, output_rgb, current_alpha,
-            reduced_config, occupied_flat_indices,
+            input_rgb,
+            output_rgb,
+            current_alpha,
+            reduced_config,
+            occupied_flat_indices,
+            shadow_threshold=shadow_threshold,
+            deep_threshold=deep_threshold,
         )
 
         diagnostics["iterations"].append(iter_info)

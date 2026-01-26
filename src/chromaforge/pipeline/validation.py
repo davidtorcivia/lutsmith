@@ -48,10 +48,11 @@ def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
 def _simple_rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     """Simplified sRGB -> Lab conversion without colour-science."""
     # Linearize sRGB
+    rgb_clipped = np.clip(rgb, 0.0, 1.0)
     linear = np.where(
-        rgb <= 0.04045,
-        rgb / 12.92,
-        ((np.clip(rgb, 0, None) + 0.055) / 1.055) ** 2.4,
+        rgb_clipped <= 0.04045,
+        rgb_clipped / 12.92,
+        ((rgb_clipped + 0.055) / 1.055) ** 2.4,
     )
 
     # sRGB -> XYZ (D65)

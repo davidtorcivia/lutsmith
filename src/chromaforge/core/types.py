@@ -179,13 +179,16 @@ class PipelineConfig:
     transfer_function: TransferFunction = TransferFunction.AUTO
     weighting: WeightingMode = WeightingMode.COVERAGE_FAIR
     alignment: str = "none"  # "none" or "auto"
+    shadow_auto: bool = True
+    shadow_threshold: Optional[float] = None
+    deep_shadow_threshold: Optional[float] = None
 
     # Refinement
     enable_refinement: bool = False
     refinement_iterations: int = 2
 
     # Output options
-    include_shaper: bool = False
+    include_shaper: Optional[bool] = None  # None = auto, True = force, False = disable
     generate_coverage_report: bool = True
     generate_metrics: bool = True
 

@@ -21,6 +21,8 @@ def solve_lut(
     sample_alpha: np.ndarray,
     config: PipelineConfig,
     occupied_flat_indices: Optional[np.ndarray] = None,
+    shadow_threshold: float | None = None,
+    deep_threshold: float | None = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """Run the full LUT regression solve.
 
@@ -54,6 +56,8 @@ def solve_lut(
         huber_delta=config.huber_delta,
         irls_iterations=config.irls_iterations,
         occupied_flat_indices=occupied_flat_indices,
+        shadow_threshold=shadow_threshold,
+        deep_threshold=deep_threshold,
     )
 
     # Post-solve safety clamp

@@ -9,7 +9,11 @@ from typing import Optional
 import numpy as np
 
 from chromaforge.core.types import TransferFunction, PipelineConfig
-from chromaforge.errors import ImageDimensionError, ImageError
+from chromaforge.color.shaper import (
+    get_shaper,
+    identity_forward,
+    identity_inverse,
+)
 from chromaforge.io.image import load_image
 
 logger = logging.getLogger(__name__)
@@ -25,11 +29,42 @@ def sanitize_image(img: np.ndarray) -> np.ndarray:
         img: (H, W, 3) float32 image.
 
     Returns:
-        Sanitized copy with NaN -> 0, Inf -> 1, -Inf -> 0, negatives clamped.
+        Sanitized copy with NaN -> 0, Inf -> 1, -Inf -> -1.
+        Preserves finite negative values to keep full-range color.
     """
-    result = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-    result = np.clip(result, 0.0, None)  # Clamp negatives
+    result = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=-1.0)
     return result.astype(np.float32)
+
+
+def _resize_to_match(
+    source: np.ndarray,
+    target: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resize images to common dimensions using the minimum of each axis.
+
+    Uses area-based interpolation (antialiased downscale) to preserve color
+    accuracy, which matters for LUT extraction.
+
+    Args:
+        source: (H1, W1, 3) float32 image.
+        target: (H2, W2, 3) float32 image.
+
+    Returns:
+        (source, target) resized to (min_H, min_W, 3).
+    """
+    from scipy.ndimage import zoom
+
+    h = min(source.shape[0], target.shape[0])
+    w = min(source.shape[1], target.shape[1])
+
+    def _resize(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+        if img.shape[0] == target_h and img.shape[1] == target_w:
+            return img
+        zoom_h = target_h / img.shape[0]
+        zoom_w = target_w / img.shape[1]
+        return zoom(img, (zoom_h, zoom_w, 1.0), order=1).astype(np.float32)
+
+    return _resize(source, h, w), _resize(target, h, w)
 
 
 def detect_transfer_function(
@@ -76,11 +111,29 @@ def detect_transfer_function(
     return TransferFunction.UNKNOWN
 
 
+def _resolve_shaper(
+    transfer_function: TransferFunction,
+    include_shaper: Optional[bool],
+) -> tuple[callable, callable, bool, str]:
+    """Resolve shaper functions and whether to apply them.
+
+    Returns:
+        (forward, inverse, applied, mode)
+    """
+    if include_shaper is False:
+        return identity_forward, identity_inverse, False, "disabled"
+
+    forward, inverse = get_shaper(transfer_function)
+    applied = forward is not identity_forward
+    mode = "forced" if include_shaper is True else "auto"
+    return forward, inverse, applied, mode
+
+
 def preprocess_pair(
     source_path: Path | str,
     target_path: Path | str,
     config: PipelineConfig,
-) -> tuple[np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, dict, dict]:
     """Load and preprocess an image pair for LUT extraction.
 
     Args:
@@ -89,7 +142,8 @@ def preprocess_pair(
         config: Pipeline configuration.
 
     Returns:
-        (source, target, metadata): Sanitized float32 images and metadata.
+        (source, target, metadata, shaper): Sanitized float32 images, metadata,
+        and shaper info dict with forward/inverse functions.
     """
     logger.info("Loading source image: %s", source_path)
     source, source_meta = load_image(source_path)
@@ -97,11 +151,12 @@ def preprocess_pair(
     logger.info("Loading target image: %s", target_path)
     target, target_meta = load_image(target_path)
 
-    # Validate matching dimensions
+    # Resize to matching dimensions if needed
     if source.shape[:2] != target.shape[:2]:
-        raise ImageDimensionError(
-            f"Source {source.shape[:2]} and target {target.shape[:2]} "
-            f"dimensions do not match"
+        source, target = _resize_to_match(source, target)
+        logger.info(
+            "Resized images to common dimensions: %dx%d",
+            source.shape[1], source.shape[0],
         )
 
     # Sanitize
@@ -115,6 +170,14 @@ def preprocess_pair(
         tf = detect_transfer_function(source, source_meta)
         logger.info("Auto-detected transfer function: %s", tf.value)
 
+    # Resolve and apply shaper (input only)
+    shaper_forward, shaper_inverse, shaper_applied, shaper_mode = _resolve_shaper(
+        tf, config.include_shaper
+    )
+    if shaper_applied:
+        logger.info("Applying shaper (%s) to source input", shaper_mode)
+        source = shaper_forward(source)
+
     metadata = {
         "source_meta": source_meta,
         "target_meta": target_meta,
@@ -122,6 +185,16 @@ def preprocess_pair(
         "width": source.shape[1],
         "height": source.shape[0],
         "total_pixels": source.shape[0] * source.shape[1],
+        "shaper_applied": shaper_applied,
+        "shaper_mode": shaper_mode,
+        "shaper_name": "log2" if shaper_applied else "identity",
     }
 
-    return source, target, metadata
+    shaper = {
+        "forward": shaper_forward,
+        "inverse": shaper_inverse,
+        "applied": shaper_applied,
+        "mode": shaper_mode,
+    }
+
+    return source, target, metadata, shaper

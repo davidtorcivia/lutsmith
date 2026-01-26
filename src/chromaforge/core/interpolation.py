@@ -269,8 +269,9 @@ def apply_lut_to_colors(
     Returns:
         (M, 3) array of transformed colors.
     """
-    # Flatten LUT for indexed access: (N^3, 3)
-    lut_flat = lut.reshape(-1, 3)
+    # Flatten LUT for indexed access (match flat index convention):
+    # flat = b*N*N + g*N + r, so transpose to (b, g, r, ch) before reshape.
+    lut_flat = np.transpose(lut, (2, 1, 0, 3)).reshape(-1, 3)
 
     if kernel == "trilinear":
         indices, weights = vectorized_trilinear(colors, N)
