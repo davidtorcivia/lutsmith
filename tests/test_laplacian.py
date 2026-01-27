@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from chromaforge.core.laplacian import build_laplacian, build_laplacian_vectorized
+from lutsmith.core.laplacian import build_laplacian, build_laplacian_vectorized
 
 
 @pytest.fixture(params=["loop", "vectorized"])
@@ -68,21 +68,21 @@ class TestLaplacian:
         """Interior node should have degree 6 (6-connected)."""
         L = build_fn(5)
         # Node (2,2,2) in a 5^3 grid is interior
-        from chromaforge.core.types import flat_index
+        from lutsmith.core.types import flat_index
         idx = flat_index(2, 2, 2, 5)
         assert L[idx, idx] == 6.0
 
     def test_corner_node_degree(self, build_fn):
         """Corner node should have degree 3."""
         L = build_fn(5)
-        from chromaforge.core.types import flat_index
+        from lutsmith.core.types import flat_index
         idx = flat_index(0, 0, 0, 5)
         assert L[idx, idx] == 3.0
 
     def test_edge_node_degree(self, build_fn):
         """Edge node (not corner, not face) should have degree 4."""
         L = build_fn(5)
-        from chromaforge.core.types import flat_index
+        from lutsmith.core.types import flat_index
         # (1, 0, 0) is on an edge
         idx = flat_index(1, 0, 0, 5)
         assert L[idx, idx] == 4.0
@@ -90,7 +90,7 @@ class TestLaplacian:
     def test_face_node_degree(self, build_fn):
         """Face center node should have degree 5."""
         L = build_fn(5)
-        from chromaforge.core.types import flat_index
+        from lutsmith.core.types import flat_index
         # (2, 2, 0) is on a face
         idx = flat_index(2, 2, 0, 5)
         assert L[idx, idx] == 5.0

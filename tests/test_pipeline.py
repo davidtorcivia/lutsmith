@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from chromaforge.core.types import PipelineConfig, ExportFormat
-from chromaforge.errors import PipelineError, PipelineCancelledError
+from lutsmith.core.types import PipelineConfig, ExportFormat
+from lutsmith.errors import PipelineError, PipelineCancelledError
 
 
 class TestPipelineRunner:
@@ -15,7 +15,7 @@ class TestPipelineRunner:
 
     def test_full_pipeline_synthetic(self, sample_image_pair, tmp_path):
         """Full pipeline on synthetic image pair should succeed."""
-        from chromaforge.pipeline.runner import run_pipeline
+        from lutsmith.pipeline.runner import run_pipeline
 
         src_path, tgt_path = sample_image_pair
         out_path = tmp_path / "output.cube"
@@ -43,7 +43,7 @@ class TestPipelineRunner:
 
     def test_pipeline_no_paths_raises(self, tmp_path):
         """Pipeline without source/target paths should raise."""
-        from chromaforge.pipeline.runner import run_pipeline
+        from lutsmith.pipeline.runner import run_pipeline
 
         config = PipelineConfig(output_path=tmp_path / "out.cube")
         with pytest.raises(PipelineError, match="Source and target"):
@@ -51,7 +51,7 @@ class TestPipelineRunner:
 
     def test_pipeline_progress_callback(self, sample_image_pair, tmp_path):
         """Progress callback should be called with valid stages."""
-        from chromaforge.pipeline.runner import run_pipeline
+        from lutsmith.pipeline.runner import run_pipeline
 
         src_path, tgt_path = sample_image_pair
         out_path = tmp_path / "output.cube"
@@ -81,7 +81,7 @@ class TestPipelineRunner:
 
     def test_pipeline_cancellation(self, sample_image_pair, tmp_path):
         """Pipeline should respect cancellation."""
-        from chromaforge.pipeline.runner import run_pipeline
+        from lutsmith.pipeline.runner import run_pipeline
 
         src_path, tgt_path = sample_image_pair
 
@@ -99,7 +99,7 @@ class TestPipelineRunner:
 
     def test_pipeline_result_has_diagnostics(self, sample_image_pair, tmp_path):
         """Result should contain timing diagnostics."""
-        from chromaforge.pipeline.runner import run_pipeline
+        from lutsmith.pipeline.runner import run_pipeline
 
         src_path, tgt_path = sample_image_pair
 

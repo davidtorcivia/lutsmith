@@ -1,4 +1,4 @@
-"""Shared fixtures for ChromaForge tests."""
+"""Shared fixtures for LutSmith tests."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from chromaforge.core.types import (
+from lutsmith.core.types import (
     InterpolationKernel,
     PipelineConfig,
     QualityMetrics,
@@ -29,21 +29,21 @@ def medium_N():
 @pytest.fixture
 def identity_lut_5():
     """5x5x5 identity LUT."""
-    from chromaforge.core.lut import identity_lut
+    from lutsmith.core.lut import identity_lut
     return identity_lut(5)
 
 
 @pytest.fixture
 def identity_lut_9():
     """9x9x9 identity LUT."""
-    from chromaforge.core.lut import identity_lut
+    from lutsmith.core.lut import identity_lut
     return identity_lut(9)
 
 
 @pytest.fixture
 def identity_lut_17():
     """17x17x17 identity LUT."""
-    from chromaforge.core.lut import identity_lut
+    from lutsmith.core.lut import identity_lut
     return identity_lut(17)
 
 
@@ -111,7 +111,7 @@ def sample_image_pair(tmp_image_dir):
 
     Returns (source_path, target_path).
     """
-    from chromaforge.io.image import save_image
+    from lutsmith.io.image import save_image
 
     rng = np.random.default_rng(99)
     source = rng.random((64, 64, 3), dtype=np.float32)

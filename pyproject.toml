@@ -3,11 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "chromaforge"
+name = "lutsmith"
 version = "0.1.0"
 description = "Image-derived 3D LUT generation tool"
 requires-python = ">=3.10"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -36,13 +36,13 @@ dev = [
 ]
 
 [project.scripts]
-chromaforge = "chromaforge.cli.app:main"
+lutsmith = "lutsmith.cli.app:main"
 
 [project.gui-scripts]
-chromaforge-gui = "chromaforge.gui.app:run"
+lutsmith-gui = "lutsmith.gui.app:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/chromaforge"]
+packages = ["src/lutsmith"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

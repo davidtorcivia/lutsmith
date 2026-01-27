@@ -1,16 +1,16 @@
-# ChromaForge
+# LutSmith
 
-Image-derived 3D LUT generation tool. ChromaForge extracts color transformations from matched image pairs and generates industry-standard 3D LUTs compatible with DaVinci Resolve, ARRI cameras, and other post-production tools.
+Image-derived 3D LUT generation tool. LutSmith extracts color transformations from matched image pairs and generates industry-standard 3D LUTs compatible with DaVinci Resolve, ARRI cameras, and other post-production tools.
 
 ---
 
 ## Overview
 
-ChromaForge solves the inverse color-grading problem: given a source image and its graded variant, it reverse-engineers the color grade as a transferable 3D lookup table. The core algorithm uses **regularized lattice regression** with Laplacian smoothing, producing high-quality LUTs even from noisy or sparsely-sampled image data.
+LutSmith solves the inverse color-grading problem: given a source image and its graded variant, it reverse-engineers the color grade as a transferable 3D lookup table. The core algorithm uses **regularized lattice regression** with Laplacian smoothing, producing high-quality LUTs even from noisy or sparsely-sampled image data.
 
 ### Two Workflows
 
-**Image-Pair Extraction** -- Provide a source image and its graded version. ChromaForge extracts the color mapping via sparse regression and outputs a .cube LUT.
+**Image-Pair Extraction** -- Provide a source image and its graded version. LutSmith extracts the color mapping via sparse regression and outputs a .cube LUT.
 
 **Hald CLUT Identity Plate** -- Process a generated Hald identity image through your grading pipeline, then reconstruct the LUT directly. Provides guaranteed full-gamut coverage with no interpolation artifacts.
 
@@ -63,7 +63,7 @@ Optional:
 ### Extract a LUT from an image pair
 
 ```
-chromaforge extract source.png graded.png -o output.cube
+lutsmith extract source.png graded.png -o output.cube
 ```
 
 Key options:
@@ -86,7 +86,7 @@ Key options:
 ### Generate a Hald identity image
 
 ```
-chromaforge hald-gen -o identity.tiff -l 8
+lutsmith hald-gen -o identity.tiff -l 8
 ```
 
 This produces a 512x512 identity image encoding a 64^3 LUT. Process it through your color grading pipeline, then reconstruct:
@@ -94,7 +94,7 @@ This produces a 512x512 identity image encoding a 64^3 LUT. Process it through y
 ### Reconstruct LUT from processed Hald image
 
 ```
-chromaforge hald-recon processed.tiff -o output.cube -l 8
+lutsmith hald-recon processed.tiff -o output.cube -l 8
 ```
 
 Options:
@@ -107,7 +107,7 @@ Options:
 ### Validate an existing LUT
 
 ```
-chromaforge validate source.png graded.png existing.cube
+lutsmith validate source.png graded.png existing.cube
 ```
 
 Applies the LUT to the source image and reports DeltaE 2000 metrics against the target.
@@ -119,7 +119,7 @@ Applies the LUT to the source image and reports DeltaE 2000 metrics against the 
 Launch the graphical interface:
 
 ```
-chromaforge-gui
+lutsmith-gui
 ```
 
 The GUI provides three tabs:
@@ -136,7 +136,7 @@ The interface uses a dark theme with amber/gold accents. Pipeline execution runs
 
 ### Regularized Lattice Regression
 
-For a LUT with N^3 grid points, ChromaForge minimizes:
+For a LUT with N^3 grid points, LutSmith minimizes:
 
 ```
 J(L) = sum_i  alpha_i * rho(||Phi(c_i, L) - c_i_out||)   [Data Fidelity]
@@ -148,7 +148,7 @@ This produces a sparse linear least-squares system solved via LSMR with an outer
 
 ### Interpolation Kernels
 
-ChromaForge supports both **trilinear** (8-corner cube) and **tetrahedral** (4-vertex, 6-way branching) interpolation. The kernel used during fitting must match the runtime application. Tetrahedral is the default, matching the Adobe .cube specification and producing smoother gradients.
+LutSmith supports both **trilinear** (8-corner cube) and **tetrahedral** (4-vertex, 6-way branching) interpolation. The kernel used during fitting must match the runtime application. Tetrahedral is the default, matching the Adobe .cube specification and producing smoother gradients.
 
 ### Indexing Convention
 
@@ -159,9 +159,9 @@ All LUT arrays use shape `(N, N, N, 3)` indexed as `lut[r, g, b, channel]`. The 
 ## Project Structure
 
 ```
-src/chromaforge/
+src/lutsmith/
     __init__.py              Package root (version)
-    __main__.py              python -m chromaforge entry point
+    __main__.py              python -m lutsmith entry point
     config.py                Constants, limits, default parameters
     errors.py                Custom exception hierarchy
     core/
@@ -229,7 +229,7 @@ tests/
 
 ## Quality Metrics
 
-After extraction, ChromaForge reports:
+After extraction, LutSmith reports:
 
 | Metric | Description | Good | Fair | Poor |
 |--------|-------------|------|------|------|
@@ -298,7 +298,7 @@ The test suite covers:
 
 ## Transfer Functions
 
-ChromaForge includes built-in support for common camera log encodings:
+LutSmith includes built-in support for common camera log encodings:
 
 | Encoding | Camera System |
 |----------|---------------|
@@ -313,4 +313,4 @@ Auto-detection is attempted based on image statistics. Manual override is availa
 
 ## License
 
-MIT
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-or-later).

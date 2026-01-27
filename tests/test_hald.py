@@ -5,13 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from chromaforge.hald.identity import (
+from lutsmith.hald.identity import (
     generate_hald_identity,
     hald_image_size,
     hald_lut_size,
 )
-from chromaforge.hald.reconstruct import reconstruct_from_hald
-from chromaforge.hald.resample import resample_lut
+from lutsmith.hald.reconstruct import reconstruct_from_hald
+from lutsmith.hald.resample import resample_lut
 
 
 class TestHaldIdentity:
@@ -99,7 +99,7 @@ class TestResample:
 
     def test_same_size_copy(self):
         """Resampling to same size should return a copy."""
-        from chromaforge.core.lut import identity_lut
+        from lutsmith.core.lut import identity_lut
         lut = identity_lut(9)
         resampled = resample_lut(lut, 9)
         np.testing.assert_array_equal(lut, resampled)
@@ -108,7 +108,7 @@ class TestResample:
 
     def test_resample_preserves_range(self):
         """Resampled identity LUT should stay in [0, 1]."""
-        from chromaforge.core.lut import identity_lut
+        from lutsmith.core.lut import identity_lut
         lut = identity_lut(9)
         resampled = resample_lut(lut, 17)
         assert resampled.min() >= -0.01
@@ -116,14 +116,14 @@ class TestResample:
 
     def test_resample_shape(self):
         """Output shape should match target size."""
-        from chromaforge.core.lut import identity_lut
+        from lutsmith.core.lut import identity_lut
         lut = identity_lut(9)
         resampled = resample_lut(lut, 17)
         assert resampled.shape == (17, 17, 17, 3)
 
     def test_resample_identity_fidelity(self):
         """Resampled identity LUT should remain close to identity."""
-        from chromaforge.core.lut import identity_lut
+        from lutsmith.core.lut import identity_lut
         src = identity_lut(17)
         resampled = resample_lut(src, 33)
         target = identity_lut(33)

@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from chromaforge.core.solver import solve_lsmr, solve_irls, solve_per_channel
-from chromaforge.core.lut import identity_lut
-from chromaforge.core.interpolation import apply_lut_to_colors
+from lutsmith.core.solver import solve_lsmr, solve_irls, solve_per_channel
+from lutsmith.core.lut import identity_lut
+from lutsmith.core.interpolation import apply_lut_to_colors
 
 
 class TestSolveLSMR:

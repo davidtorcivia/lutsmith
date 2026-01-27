@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from chromaforge.core.matrix import (
+from lutsmith.core.matrix import (
     compute_interpolation_weights,
     build_data_matrix,
     build_data_rhs,
@@ -14,7 +14,7 @@ from chromaforge.core.matrix import (
     build_prior_matrix,
     build_full_system,
 )
-from chromaforge.core.types import flat_index
+from lutsmith.core.types import flat_index
 
 
 class TestInterpolationWeights:

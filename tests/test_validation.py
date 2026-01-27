@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from chromaforge.core.lut import identity_lut
-from chromaforge.pipeline.validation import validate_lut
+from lutsmith.core.lut import identity_lut
+from lutsmith.pipeline.validation import validate_lut
 
 
 class TestValidation:

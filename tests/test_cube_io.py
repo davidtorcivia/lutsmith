@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from chromaforge.core.lut import identity_lut
-from chromaforge.io.cube import write_cube, read_cube
-from chromaforge.errors import LUTFormatError
+from lutsmith.core.lut import identity_lut
+from lutsmith.io.cube import write_cube, read_cube
+from lutsmith.errors import LUTFormatError
 
 
 class TestCubeRoundTrip:

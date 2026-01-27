@@ -1,4 +1,4 @@
-# ChromaForge: Technical Design Document
+# LutSmith: Technical Design Document
 
 ## Image-Derived 3D LUT Generation Tool
 **Version:** 1.1  
@@ -9,16 +9,16 @@
 
 ## 1. Project Summary
 
-ChromaForge extracts color transformations from matched image pairs and generates industry-standard 3D LUTs. The tool solves the inverse problem: given a source image and its graded variant, reverse-engineer the color grade as a transferable lookup table.
+LutSmith extracts color transformations from matched image pairs and generates industry-standard 3D LUTs. The tool solves the inverse problem: given a source image and its graded variant, reverse-engineer the color grade as a transferable lookup table.
 
 ### Primary Workflow (Image-Pair Extraction)
 1. User provides source image + graded version of same image
-2. ChromaForge extracts the color mapping via regularized regression
+2. LutSmith extracts the color mapping via regularized regression
 3. Outputs a 3D LUT usable in DaVinci Resolve, ARRI cameras, etc.
 
 ### Secondary Workflow (Identity Plate Mode)
 1. User processes a Hald CLUT identity image through their grading pipeline
-2. ChromaForge directly reconstructs the LUT from the processed identity
+2. LutSmith directly reconstructs the LUT from the processed identity
 3. Provides guaranteed full-gamut coverage with no interpolation needed
 
 > **Note:** Identity Plate Mode ships in Phase 1—it provides ground truth for testing exporters and immediate value to users while regression math is refined.
@@ -146,7 +146,7 @@ This approach:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         CHROMAFORGE PIPELINE                            │
+│                         LUTSMITH PIPELINE                            │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │

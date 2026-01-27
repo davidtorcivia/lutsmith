@@ -15,7 +15,7 @@ class TestBinPixels:
 
     def test_count_conservation(self):
         """Total counts across all bins should equal number of pixels."""
-        from chromaforge._numba_kernels.binning import bin_pixels_numpy
+        from lutsmith._numba_kernels.binning import bin_pixels_numpy
 
         rng = np.random.default_rng(42)
         M = 1000
@@ -41,7 +41,7 @@ class TestBinPixels:
         bin_res = 4
         px, py = self._make_coords(M)
 
-        from chromaforge._numba_kernels.binning import bin_pixels_numpy
+        from lutsmith._numba_kernels.binning import bin_pixels_numpy
         counts, sum_input, mean_output, m2_output, sx, sy = bin_pixels_numpy(
             source, target, bin_res, px, py
         )
@@ -59,7 +59,7 @@ class TestBinPixels:
 
     def test_bin_resolution(self):
         """Number of bins should be bin_res^3."""
-        from chromaforge._numba_kernels.binning import bin_pixels_numpy
+        from lutsmith._numba_kernels.binning import bin_pixels_numpy
         bin_res = 8
         M = 100
         source = np.random.default_rng(42).random((M, 3), dtype=np.float32)
@@ -72,7 +72,7 @@ class TestBinPixels:
     def test_numba_vs_numpy_agreement(self):
         """Numba and NumPy implementations should produce identical results."""
         try:
-            from chromaforge._numba_kernels.binning import (
+            from lutsmith._numba_kernels.binning import (
                 bin_pixels,
                 bin_pixels_numpy,
             )
@@ -104,12 +104,12 @@ class TestSampling:
 
     def test_bins_to_samples(self):
         """bins_to_samples should produce arrays of correct shape."""
-        from chromaforge.pipeline.sampling import (
+        from lutsmith.pipeline.sampling import (
             bin_and_aggregate,
             bins_to_samples,
             compute_sample_weights,
         )
-        from chromaforge.core.types import PipelineConfig
+        from lutsmith.core.types import PipelineConfig
 
         rng = np.random.default_rng(42)
         H, W = 32, 32

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from chromaforge.color.shaper import (
+from lutsmith.color.shaper import (
     enforce_monotonic,
     get_shaper,
     identity_forward,
@@ -14,7 +14,7 @@ from chromaforge.color.shaper import (
     log_shaper_inverse,
     generate_1d_shaper,
 )
-from chromaforge.core.types import TransferFunction
+from lutsmith.core.types import TransferFunction
 
 
 class TestShaperFunctions:

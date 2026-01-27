@@ -5,14 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from chromaforge.core.interpolation import (
+from lutsmith.core.interpolation import (
     trilinear_weights,
     tetrahedral_weights,
     vectorized_trilinear,
     vectorized_tetrahedral,
     apply_lut_to_colors,
 )
-from chromaforge.core.types import flat_index
+from lutsmith.core.types import flat_index
 
 
 class TestTrilinearWeights:
