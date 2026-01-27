@@ -49,7 +49,7 @@ COVERAGE_DENSE_THRESHOLD = 2  # Grid steps
 COVERAGE_SPARSE_THRESHOLD = 5
 
 # --- Shadow smoothness boost ---
-DEFAULT_SHADOW_SMOOTH_BOOST = 10.0  # Laplacian weight multiplier for deep-shadow nodes
+DEFAULT_SHADOW_SMOOTH_BOOST = 25.0  # Laplacian weight multiplier for deep-shadow nodes
 
 # --- Prior strength falloff ---
 PRIOR_DISTANCE_SCALE = 3.0  # Distance at which prior strength is ~63% of max
