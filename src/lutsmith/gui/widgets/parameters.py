@@ -275,6 +275,74 @@ class ParameterPanel(QWidget):
         self.shadow_auto.stateChanged.connect(self._toggle_shadow_controls)
         self._toggle_shadow_controls()
 
+        # Prior Model
+        prior_tip = (
+            "Controls the prior (starting point) for the LUT solver.\n\n"
+            "Identity: The classic identity-transform prior. Unobserved\n"
+            "LUT regions fall back to 'no change'. Simple and safe.\n\n"
+            "Baseline Residual: First fits a parametric baseline\n"
+            "T0(x) = h(Mx+b), then solves for the residual delta.\n"
+            "Much better extrapolation for strong color grades.\n\n"
+            "Baseline + Multigrid: Same as above but uses coarse-to-fine\n"
+            "multigrid for better convergence on large LUTs."
+        )
+        self.prior_model = QComboBox()
+        self.prior_model.addItems(["identity", "baseline_residual", "baseline_multigrid_residual"])
+        self.prior_model.setToolTip(prior_tip)
+        adv_form.addRow(self._tip_label("Prior Model:", prior_tip), self.prior_model)
+
+        # Color Basis
+        basis_tip = (
+            "Color space for regularization.\n\n"
+            "RGB: Independent smoothness per R, G, B channel.\n"
+            "Standard behavior.\n\n"
+            "Opponent: Separates luminance (Y) from chrominance\n"
+            "(C1, C2). Allows stronger chroma smoothing without\n"
+            "blurring luminance detail. Reduces color fringing\n"
+            "in sparse regions."
+        )
+        self.color_basis = QComboBox()
+        self.color_basis.addItems(["rgb", "opponent"])
+        self.color_basis.setToolTip(basis_tip)
+        adv_form.addRow(self._tip_label("Color Basis:", basis_tip), self.color_basis)
+
+        # Chroma Smoothness Ratio
+        chroma_tip = (
+            "How much more smoothness to apply to chroma channels\n"
+            "relative to luminance (opponent mode only).\n\n"
+            "Higher values = smoother chroma, preserving luma detail.\n"
+            "Only active when Color Basis is 'opponent'.\n\n"
+            "1.0: Same as RGB mode (no benefit)\n"
+            "4.0: Default. 4x more chroma smoothing.\n"
+            "8.0 - 16.0: Very smooth chroma, may lose saturation detail."
+        )
+        self.chroma_ratio = QDoubleSpinBox()
+        self.chroma_ratio.setRange(1.0, 16.0)
+        self.chroma_ratio.setSingleStep(0.5)
+        self.chroma_ratio.setValue(4.0)
+        self.chroma_ratio.setDecimals(1)
+        self.chroma_ratio.setToolTip(chroma_tip)
+        adv_form.addRow(self._tip_label("Chroma Ratio:", chroma_tip), self.chroma_ratio)
+
+        # Laplacian Connectivity
+        lap_tip = (
+            "Number of neighbor connections per LUT node in the\n"
+            "smoothness graph.\n\n"
+            "6: Face-adjacent neighbors only (default). Standard\n"
+            "cubic stencil, fastest computation.\n\n"
+            "18: Adds 12 edge-diagonal neighbors. Smoother results\n"
+            "with less axis-aligned bias.\n\n"
+            "26: Full 3D neighborhood including 8 corner-diagonals.\n"
+            "Smoothest but most expensive per iteration."
+        )
+        self.laplacian_connectivity = QComboBox()
+        self.laplacian_connectivity.addItems(["6", "18", "26"])
+        self.laplacian_connectivity.setToolTip(lap_tip)
+        adv_form.addRow(self._tip_label("Laplacian:", lap_tip), self.laplacian_connectivity)
+
+        self.color_basis.currentTextChanged.connect(self._toggle_chroma_controls)
+        self._toggle_chroma_controls()
+
         # Refinement
         refine_tip = (
             "After the initial solve, apply the LUT to the source\n"
@@ -347,6 +415,11 @@ class ParameterPanel(QWidget):
             "v Advanced" if self._advanced_visible else "> Advanced"
         )
 
+    def _toggle_chroma_controls(self):
+        """Enable chroma ratio only when opponent basis is selected."""
+        is_opponent = self.color_basis.currentText() == "opponent"
+        self.chroma_ratio.setEnabled(is_opponent)
+
     def reset_defaults(self):
         self.lut_size.setCurrentText("33")
         self.kernel.setCurrentIndex(0)
@@ -360,6 +433,10 @@ class ParameterPanel(QWidget):
         self.shadow_auto.setChecked(True)
         self.shadow_threshold.setValue(0.25)
         self.deep_shadow_threshold.setValue(0.08)
+        self.prior_model.setCurrentIndex(0)
+        self.color_basis.setCurrentIndex(0)
+        self.chroma_ratio.setValue(4.0)
+        self.laplacian_connectivity.setCurrentIndex(0)
         self.enable_refine.setChecked(False)
         self.transfer_fn.setCurrentIndex(0)
         self.shaper_mode.setCurrentIndex(0)

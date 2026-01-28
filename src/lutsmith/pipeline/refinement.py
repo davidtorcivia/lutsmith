@@ -7,6 +7,7 @@ identifies systematic errors, and refits with adjusted weights.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -109,17 +110,7 @@ def refine_lut(
         current_alpha = current_alpha * downweight
 
         # Refit with slightly reduced smoothness (more data trust)
-        reduced_config = PipelineConfig(
-            lut_size=config.lut_size,
-            smoothness=config.smoothness * 0.8,
-            prior_strength=config.prior_strength,
-            kernel=config.kernel,
-            robust_loss=config.robust_loss,
-            huber_delta=config.huber_delta,
-            irls_iterations=config.irls_iterations,
-            bin_resolution=config.bin_resolution,
-            min_samples_per_bin=config.min_samples_per_bin,
-        )
+        reduced_config = replace(config, smoothness=config.smoothness * 0.8)
 
         current_lut, _ = solve_lut(
             input_rgb,

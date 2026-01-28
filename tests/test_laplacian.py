@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from lutsmith.core.laplacian import build_laplacian, build_laplacian_vectorized
+from lutsmith.core.laplacian import (
+    build_laplacian,
+    build_laplacian_extended,
+    build_laplacian_vectorized,
+)
 
 
 @pytest.fixture(params=["loop", "vectorized"])
@@ -102,3 +106,79 @@ class TestLaplacian:
         L_vec = build_laplacian_vectorized(N)
         diff = L_loop - L_vec
         assert sparse.linalg.norm(diff) < 1e-10
+
+
+class TestLaplacianExtended:
+    """Tests for extended connectivity (18 and 26)."""
+
+    @pytest.fixture(params=[18, 26])
+    def connectivity(self, request):
+        return request.param
+
+    def test_symmetric(self, connectivity):
+        """Extended Laplacian should be symmetric."""
+        L = build_laplacian_extended(5, connectivity)
+        diff = L - L.T
+        assert sparse.linalg.norm(diff) < 1e-10
+
+    def test_row_sums_zero(self, connectivity):
+        """Each row should sum to zero."""
+        L = build_laplacian_extended(5, connectivity)
+        row_sums = np.array(L.sum(axis=1)).flatten()
+        np.testing.assert_allclose(row_sums, 0.0, atol=1e-10)
+
+    def test_constant_in_null_space(self, connectivity):
+        """L * constant_vector = 0."""
+        L = build_laplacian_extended(5, connectivity)
+        ones = np.ones(5 ** 3)
+        result = L @ ones
+        np.testing.assert_allclose(result, 0.0, atol=1e-10)
+
+    def test_shape(self, connectivity):
+        """Matrix should be N^3 x N^3."""
+        for N in [3, 5]:
+            L = build_laplacian_extended(N, connectivity)
+            expected = N ** 3
+            assert L.shape == (expected, expected)
+
+    def test_positive_diagonal(self, connectivity):
+        """Diagonal entries should be non-negative."""
+        L = build_laplacian_extended(5, connectivity)
+        diag = L.diagonal()
+        assert np.all(diag >= -1e-10)
+
+    def test_interior_degree_normalized_to_six(self, connectivity):
+        """Interior node diagonal should be normalized to 6.0."""
+        N = 5
+        L = build_laplacian_extended(N, connectivity)
+        from lutsmith.core.types import flat_index
+        idx = flat_index(2, 2, 2, N)
+        np.testing.assert_allclose(L[idx, idx], 6.0, atol=1e-10)
+
+    def test_more_neighbors_than_6connected(self, connectivity):
+        """Extended connectivity should have more non-zero entries per row."""
+        N = 5
+        L_6 = build_laplacian_vectorized(N)
+        L_ext = build_laplacian_extended(N, connectivity)
+        # Extended should have more non-zeros
+        assert L_ext.nnz > L_6.nnz
+
+    def test_connectivity_6_delegates_to_vectorized(self):
+        """connectivity=6 should produce identical result to build_laplacian_vectorized."""
+        N = 5
+        L_6 = build_laplacian_vectorized(N)
+        L_ext = build_laplacian_extended(N, 6)
+        diff = L_6 - L_ext
+        assert sparse.linalg.norm(diff) < 1e-10
+
+    def test_invalid_connectivity_raises(self):
+        """Unsupported connectivity should raise ValueError."""
+        with pytest.raises(ValueError, match="Unsupported connectivity"):
+            build_laplacian_extended(5, 12)
+
+    def test_26_has_more_entries_than_18(self):
+        """26-connected should have more non-zeros than 18-connected."""
+        N = 5
+        L_18 = build_laplacian_extended(N, 18)
+        L_26 = build_laplacian_extended(N, 26)
+        assert L_26.nnz > L_18.nnz

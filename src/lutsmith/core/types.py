@@ -79,6 +79,19 @@ class WeightingMode(str, Enum):
     FREQUENCY = "frequency"
 
 
+class PriorModel(str, Enum):
+    """Prior model for LUT regression."""
+    IDENTITY = "identity"
+    BASELINE_RESIDUAL = "baseline_residual"
+    BASELINE_MULTIGRID_RESIDUAL = "baseline_multigrid_residual"
+
+
+class ColorBasis(str, Enum):
+    """Color space basis for regularization."""
+    RGB = "rgb"
+    OPPONENT = "opponent"
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -182,6 +195,22 @@ class PipelineConfig:
     shadow_auto: bool = True
     shadow_threshold: Optional[float] = None
     deep_shadow_threshold: Optional[float] = None
+
+    # Prior model and color basis
+    prior_model: PriorModel = PriorModel.IDENTITY
+    color_basis: ColorBasis = ColorBasis.RGB
+    chroma_smoothness_ratio: float = 4.0
+
+    # Neutral-aware chroma prior
+    neutral_chroma_prior_k: float = 3.0
+    neutral_chroma_prior_sigma: float = 0.12
+
+    # Laplacian connectivity
+    laplacian_connectivity: int = 6  # 6, 18, or 26
+
+    # Multigrid
+    multigrid_coarse_size: int = 17
+    multigrid_smoothness_scale: float = 2.0
 
     # Refinement
     enable_refinement: bool = False

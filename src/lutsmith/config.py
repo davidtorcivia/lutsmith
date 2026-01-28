@@ -53,3 +53,19 @@ DEFAULT_SHADOW_SMOOTH_BOOST = 25.0  # Laplacian weight multiplier for deep-shado
 
 # --- Prior strength falloff ---
 PRIOR_DISTANCE_SCALE = 3.0  # Distance at which prior strength is ~63% of max
+
+# --- Opponent-space defaults ---
+DEFAULT_CHROMA_SMOOTHNESS_RATIO = 4.0  # Chroma-to-luma smoothness ratio
+
+# --- Neutral-aware chroma prior ---
+DEFAULT_NEUTRAL_CHROMA_K = 3.0  # Max boost factor at neutral axis
+DEFAULT_NEUTRAL_CHROMA_SIGMA = 0.12  # Gaussian width (RGB units)
+
+# --- Multigrid ---
+DEFAULT_MULTIGRID_COARSE_SIZE = 17
+DEFAULT_MULTIGRID_SMOOTHNESS_SCALE = 2.0  # Smoothness multiplier per coarse level
+
+# --- Baseline prior ---
+BASELINE_ALTERNATING_ITERATIONS = 3  # Alternating optimization iterations
+BASELINE_PAVA_KNOTS = 64  # Number of knots for monotone curve fitting
+BASELINE_QUALITY_THRESHOLD = 0.95  # Baseline must be this fraction of identity MSE

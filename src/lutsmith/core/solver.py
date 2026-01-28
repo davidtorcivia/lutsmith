@@ -36,6 +36,7 @@ from lutsmith.core.matrix import (
     compute_interpolation_weights,
 )
 from lutsmith.core.distance import compute_distance_to_data
+from lutsmith.core.laplacian import build_laplacian_extended, build_laplacian_vectorized
 from lutsmith.errors import SolverDivergenceError
 
 logger = logging.getLogger(__name__)
@@ -173,11 +174,18 @@ def solve_per_channel(
     parallel: bool = True,
     shadow_threshold: float | None = None,
     deep_threshold: float | None = None,
+    connectivity: int = 6,
+    prior_lut_flat: np.ndarray | None = None,
+    color_basis: str = "rgb",
+    chroma_smoothness_ratio: float = 4.0,
+    neutral_chroma_prior_k: float = 3.0,
+    neutral_chroma_prior_sigma: float = 0.12,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Solve the LUT regression independently for each RGB channel.
+    """Solve the LUT regression independently for each output channel.
 
     Pre-computes shared components (interpolation weights, Laplacian,
-    distances) once and reuses them for all three channels.
+    distances) once and reuses them for all three channels. Supports
+    both RGB and opponent-space solving.
 
     Args:
         input_rgb: (M, 3) input sample colors.
@@ -195,6 +203,12 @@ def solve_per_channel(
         parallel: Whether to solve channels in parallel threads.
         shadow_threshold: Upper luminance boundary for shadow smoothness boost.
         deep_threshold: Luminance boundary for maximum smoothness boost.
+        connectivity: Laplacian connectivity (6, 18, or 26).
+        prior_lut_flat: (N^3, 3) prior LUT values. None = identity LUT.
+        color_basis: "rgb" or "opponent" for regularization space.
+        chroma_smoothness_ratio: Chroma-to-luma smoothness ratio (opponent mode).
+        neutral_chroma_prior_k: Max prior boost factor at neutral axis.
+        neutral_chroma_prior_sigma: Gaussian width for neutral boost.
 
     Returns:
         (lut, infos): (N, N, N, 3) LUT array and list of 3 solver info dicts.
@@ -205,12 +219,12 @@ def solve_per_channel(
     logger.info("Computing interpolation weights for %d samples...", len(input_rgb))
     corner_indices, corner_weights = compute_interpolation_weights(input_rgb, N, kernel)
 
-    logger.info("Building smoothness matrix (N=%d)...", N)
-    laplacian_cached = build_smoothness_matrix(
-        N, lambda_s,
-        shadow_threshold=shadow_threshold,
-        deep_threshold=deep_threshold,
-    )
+    # Build raw Laplacian once (shared across channels)
+    logger.info("Building Laplacian matrix (N=%d, connectivity=%d)...", N, connectivity)
+    if connectivity != 6:
+        raw_L = build_laplacian_extended(N, connectivity)
+    else:
+        raw_L = build_laplacian_vectorized(N)
 
     logger.info("Computing distance-to-data...")
     if occupied_flat_indices is not None:
@@ -218,24 +232,71 @@ def solve_per_channel(
     else:
         distances = np.ones(total)
 
-    # Identity LUT values for prior
-    id_flat = identity_lut_flat(N)
+    # Prior LUT values (identity or caller-supplied baseline)
+    if prior_lut_flat is not None:
+        prior_flat = prior_lut_flat
+    else:
+        prior_flat = identity_lut_flat(N)
+
+    # Opponent-space setup
+    opponent_mode = (color_basis == "opponent")
+    if opponent_mode:
+        from lutsmith.core.opponent import (
+            rgb_to_opponent, opponent_to_rgb, compute_neutral_chroma_boost,
+        )
+        # Transform outputs and prior to opponent space
+        solve_output = rgb_to_opponent(output_rgb)
+        prior_flat = rgb_to_opponent(prior_flat)
+        # Neutral chroma boost (only for C1, C2 channels)
+        chroma_boost = compute_neutral_chroma_boost(
+            N, k=neutral_chroma_prior_k, sigma=neutral_chroma_prior_sigma,
+        )
+    else:
+        solve_output = output_rgb
+
+    # Build per-channel smoothness matrices using the shared raw Laplacian.
+    # In opponent mode, chroma channels (1, 2) use higher lambda_s.
+    if opponent_mode:
+        laplacian_y = build_smoothness_matrix(
+            N, lambda_s,
+            shadow_threshold=shadow_threshold,
+            deep_threshold=deep_threshold,
+            raw_laplacian=raw_L,
+        )
+        laplacian_c = build_smoothness_matrix(
+            N, lambda_s * chroma_smoothness_ratio,
+            shadow_threshold=shadow_threshold,
+            deep_threshold=deep_threshold,
+            raw_laplacian=raw_L,
+        )
+        channel_laplacians = [laplacian_y, laplacian_c, laplacian_c]
+        channel_prior_boosts = [None, chroma_boost, chroma_boost]
+    else:
+        laplacian_cached = build_smoothness_matrix(
+            N, lambda_s,
+            shadow_threshold=shadow_threshold,
+            deep_threshold=deep_threshold,
+            raw_laplacian=raw_L,
+        )
+        channel_laplacians = [laplacian_cached] * 3
+        channel_prior_boosts = [None] * 3
 
     def solve_channel(ch: int) -> tuple[np.ndarray, dict]:
         """Solve for one output channel."""
         A, b = build_full_system(
             input_rgb=input_rgb,
-            output_channel=output_rgb[:, ch],
+            output_channel=solve_output[:, ch],
             sample_alpha=sample_alpha,
             N=N,
             lambda_s=lambda_s,
             lambda_r=lambda_r,
             kernel=kernel,
             precomputed_weights=(corner_indices, corner_weights),
-            precomputed_laplacian=laplacian_cached,
+            precomputed_laplacian=channel_laplacians[ch],
             precomputed_distances=distances,
-            prior_channel=id_flat[:, ch],
+            prior_channel=prior_flat[:, ch],
             distance_scale=distance_scale,
+            prior_boost=channel_prior_boosts[ch],
         )
 
         x, info = solve_irls(
@@ -252,7 +313,7 @@ def solve_per_channel(
         return x, info
 
     # Solve all 3 channels
-    channel_names = ["R", "G", "B"]
+    channel_names = ["Y", "C1", "C2"] if opponent_mode else ["R", "G", "B"]
     lut = np.zeros((N, N, N, 3), dtype=np.float32)
     infos = [None, None, None]
 
@@ -283,5 +344,11 @@ def solve_per_channel(
             logger.info("Channel %s solved: %s", channel_names[ch],
                         "converged" if info.get("irls_converged", info.get("converged"))
                         else "not converged")
+
+    # Convert back from opponent to RGB if needed
+    if opponent_mode:
+        lut_reshaped = lut.reshape(-1, 3).astype(np.float64)
+        lut_rgb = opponent_to_rgb(lut_reshaped)
+        lut = lut_rgb.reshape(N, N, N, 3).astype(np.float32)
 
     return lut, infos

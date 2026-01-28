@@ -23,10 +23,12 @@ except ImportError:
 
 from lutsmith import __version__
 from lutsmith.core.types import (
+    ColorBasis,
     ExportFormat,
     InterpolationKernel,
     PipelineConfig,
     PipelineResult,
+    PriorModel,
     RobustLoss,
     TransferFunction,
 )
@@ -461,6 +463,10 @@ class MainWindow(QMainWindow):
             shadow_auto=shadow_auto,
             shadow_threshold=shadow_threshold,
             deep_shadow_threshold=deep_shadow_threshold,
+            prior_model=PriorModel(self._params.prior_model.currentText()),
+            color_basis=ColorBasis(self._params.color_basis.currentText()),
+            chroma_smoothness_ratio=self._params.chroma_ratio.value(),
+            laplacian_connectivity=int(self._params.laplacian_connectivity.currentText()),
         )
 
     @Slot()

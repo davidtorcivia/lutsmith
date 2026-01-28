@@ -21,9 +21,11 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 
 from lutsmith import __version__
 from lutsmith.core.types import (
+    ColorBasis,
     ExportFormat,
     InterpolationKernel,
     PipelineConfig,
+    PriorModel,
     RobustLoss,
     TransferFunction,
 )
@@ -96,6 +98,26 @@ def extract(
         max=1.0,
         help="Deep shadow threshold (0-1). Overrides auto if set.",
     ),
+    prior_model: str = typer.Option(
+        "identity",
+        "--prior-model",
+        help="Prior model: identity, baseline_residual, baseline_multigrid_residual.",
+    ),
+    color_basis: str = typer.Option(
+        "rgb",
+        "--color-basis",
+        help="Regularization color space: rgb, opponent.",
+    ),
+    chroma_ratio: float = typer.Option(
+        4.0,
+        "--chroma-ratio",
+        help="Chroma-to-luma smoothness ratio (opponent mode).",
+    ),
+    laplacian_connectivity: int = typer.Option(
+        6,
+        "--laplacian-connectivity",
+        help="Laplacian connectivity: 6, 18, or 26.",
+    ),
     shaper: str = typer.Option(
         "auto",
         "--shaper",
@@ -131,6 +153,10 @@ def extract(
         shadow_auto=shadow_auto,
         shadow_threshold=shadow_threshold,
         deep_shadow_threshold=deep_shadow_threshold,
+        prior_model=PriorModel(prior_model),
+        color_basis=ColorBasis(color_basis),
+        chroma_smoothness_ratio=chroma_ratio,
+        laplacian_connectivity=laplacian_connectivity,
     )
 
     from lutsmith.pipeline.runner import run_pipeline

@@ -22,7 +22,7 @@ import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, diags, vstack
 
 from lutsmith.core.interpolation import vectorized_trilinear, vectorized_tetrahedral
-from lutsmith.core.laplacian import build_laplacian_vectorized
+from lutsmith.core.laplacian import build_laplacian_extended, build_laplacian_vectorized
 from lutsmith.core.distance import compute_distance_to_data, prior_strength_from_distance
 from lutsmith.core.lut import identity_lut_flat
 
@@ -115,6 +115,8 @@ def build_smoothness_matrix(
     shadow_threshold: float | None = None,
     deep_threshold: float | None = None,
     shadow_boost: float | None = None,
+    connectivity: int = 6,
+    raw_laplacian: csr_matrix | None = None,
 ) -> tuple[csr_matrix, np.ndarray]:
     """Build the smoothness (Laplacian) part of the system.
 
@@ -131,13 +133,20 @@ def build_smoothness_matrix(
         deep_threshold: Luminance boundary below which maximum boost applies.
             Between deep and shadow threshold, boost ramps down smoothly.
         shadow_boost: Maximum smoothness multiplier for deep-shadow nodes.
+        connectivity: Laplacian connectivity (6, 18, or 26).
+        raw_laplacian: Pre-built Laplacian matrix (avoids redundant construction).
 
     Returns:
         (matrix, rhs): CSR matrix (N^3, N^3) and zero RHS (N^3,).
     """
     from lutsmith.config import DEFAULT_SHADOW_SMOOTH_BOOST
 
-    L = build_laplacian_vectorized(N)
+    if raw_laplacian is not None:
+        L = raw_laplacian
+    elif connectivity != 6:
+        L = build_laplacian_extended(N, connectivity)
+    else:
+        L = build_laplacian_vectorized(N)
     total = N ** 3
 
     if shadow_threshold is not None and shadow_threshold > 0:
@@ -186,8 +195,9 @@ def build_prior_matrix(
     distances: np.ndarray,
     prior_channel: np.ndarray,
     distance_scale: float = 3.0,
+    prior_boost: np.ndarray | None = None,
 ) -> tuple[csr_matrix, np.ndarray]:
-    """Build the identity prior part of the system.
+    """Build the prior part of the system.
 
     Args:
         N: LUT grid size.
@@ -195,12 +205,16 @@ def build_prior_matrix(
         distances: (N^3,) distance-to-data per node.
         prior_channel: (N^3,) prior values for this channel.
         distance_scale: Distance scaling for prior strength.
+        prior_boost: (N^3,) optional per-node multiplier for beta
+            (e.g., neutral-aware chroma boost).
 
     Returns:
         (matrix, rhs): Diagonal CSR matrix (N^3, N^3) and prior RHS (N^3,).
     """
     total = N ** 3
     beta = prior_strength_from_distance(distances, scale=distance_scale)
+    if prior_boost is not None:
+        beta = beta * prior_boost
     sqrt_lr_beta = np.sqrt(max(lambda_r, 0.0)) * np.sqrt(beta)
 
     # Diagonal matrix
@@ -227,6 +241,7 @@ def build_full_system(
     occupied_flat_indices: np.ndarray | None = None,
     prior_channel: np.ndarray | None = None,
     distance_scale: float = 3.0,
+    prior_boost: np.ndarray | None = None,
 ) -> tuple[csr_matrix, np.ndarray]:
     """Build the complete stacked sparse system for one output channel.
 
@@ -284,7 +299,8 @@ def build_full_system(
         prior_channel = id_flat[:, 0]  # fallback to R channel
 
     A_prior, b_prior = build_prior_matrix(
-        N, lambda_r, precomputed_distances, prior_channel, distance_scale
+        N, lambda_r, precomputed_distances, prior_channel, distance_scale,
+        prior_boost=prior_boost,
     )
 
     # 5. Stack vertically

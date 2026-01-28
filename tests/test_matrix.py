@@ -141,3 +141,74 @@ class TestFullSystem:
         assert A.shape[1] == N ** 3
         assert A.shape[0] == b.shape[0]
         assert A.shape[0] >= M  # At least data rows
+
+
+class TestPriorBoost:
+    """Tests for prior_boost parameter in build_prior_matrix."""
+
+    def test_boost_increases_prior_strength(self, small_N):
+        """prior_boost > 1 should increase diagonal entries."""
+        N = small_N
+        N3 = N ** 3
+        distances = np.ones(N3, dtype=np.float32)
+        prior_ch = np.linspace(0, 1, N3, dtype=np.float32)
+
+        # Without boost
+        A_base, b_base = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+        )
+
+        # With boost of 4.0 (should scale by sqrt(4) = 2)
+        boost = np.full(N3, 4.0)
+        A_boosted, b_boosted = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+            prior_boost=boost,
+        )
+
+        # Diagonal of boosted should be 2x the base (sqrt(4) = 2)
+        diag_base = A_base.diagonal()
+        diag_boosted = A_boosted.diagonal()
+        np.testing.assert_allclose(diag_boosted, 2.0 * diag_base, atol=1e-10)
+
+    def test_boost_of_one_is_no_op(self, small_N):
+        """prior_boost of all ones should not change the result."""
+        N = small_N
+        N3 = N ** 3
+        distances = np.ones(N3, dtype=np.float32)
+        prior_ch = np.linspace(0, 1, N3, dtype=np.float32)
+
+        A_base, b_base = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+        )
+
+        boost = np.ones(N3)
+        A_boosted, b_boosted = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+            prior_boost=boost,
+        )
+
+        np.testing.assert_allclose(
+            A_boosted.toarray(), A_base.toarray(), atol=1e-12
+        )
+        np.testing.assert_allclose(b_boosted, b_base, atol=1e-12)
+
+    def test_none_boost_is_no_op(self, small_N):
+        """prior_boost=None should be identical to no boost."""
+        N = small_N
+        N3 = N ** 3
+        distances = np.ones(N3, dtype=np.float32)
+        prior_ch = np.linspace(0, 1, N3, dtype=np.float32)
+
+        A_base, b_base = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+        )
+
+        A_none, b_none = build_prior_matrix(
+            N, lambda_r=0.01, distances=distances, prior_channel=prior_ch,
+            prior_boost=None,
+        )
+
+        np.testing.assert_allclose(
+            A_none.toarray(), A_base.toarray(), atol=1e-12
+        )
+        np.testing.assert_allclose(b_none, b_base, atol=1e-12)
