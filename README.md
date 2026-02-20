@@ -12,6 +12,10 @@ LutSmith solves the inverse color-grading problem: given a source image and its 
 
 **Image-Pair Extraction** -- Provide a source image and its graded version. LutSmith extracts the color mapping via sparse regression and outputs a .cube LUT.
 
+**Batch Pair Extraction** -- Provide many matched source/target frame pairs (for example restored->original film frames). LutSmith fits one robust aggregate LUT from all pair-derived samples.
+
+**Scene-Clustered Batch Extraction** -- Split matched pairs into scene/style clusters (manual labels or auto clustering), then fit one LUT per cluster plus an optional master LUT.
+
 **Hald CLUT Identity Plate** -- Process a generated Hald identity image through your grading pipeline, then reconstruct the LUT directly. Provides guaranteed full-gamut coverage with no interpolation artifacts.
 
 ---
@@ -92,6 +96,57 @@ Advanced solver options:
   --laplacian-connectivity INT     Laplacian connectivity: 6, 18, 26 [default: 6]
 ```
 
+### Extract an aggregate LUT from many matched pairs
+
+Create a manifest CSV with one `source,target[,weight][,cluster]` pair per line:
+
+```
+# pairs.csv
+source,target,weight,cluster
+restored/frame_0001.png,original/frame_0001.png,1.0,scene_a
+restored/frame_0002.png,original/frame_0002.png,1.0,scene_a
+restored/frame_0003.png,original/frame_0003.png,0.7,scene_b
+```
+
+Then run:
+
+```
+lutsmith extract-batch pairs.csv -o restoration_to_original.cube --prior-model baseline_residual
+```
+
+Useful robustness controls:
+
+```
+  --pair-balance TEXT            equal | by_bins | by_pixels [default: equal]
+  --outlier-sigma FLOAT          Reject high-error pairs via median + sigma*MAD [default: 0.0]
+  --min-pairs-after-outlier INT  Minimum pairs to keep after rejection [default: 3]
+  --allow-mixed-transfer         Permit mixed transfer-function detections across pairs
+```
+
+`extract-batch` uses the same solver options as `extract`, applies pair-aware weighting, and fits from the union of all pair bins. This is more robust than averaging finished LUT cubes.
+
+Scene-clustered extraction options:
+
+```
+  --cluster-mode TEXT            none | manual | auto [default: none]
+  --cluster-count INT            Fixed cluster count in auto mode (0 = automatic)
+  --max-clusters INT             Upper bound for automatic cluster search [default: 6]
+  --export-master/--no-export-master
+                                 Export aggregate LUT in addition to per-cluster LUTs
+  --cluster-seed INT             Random seed for auto clustering [default: 42]
+  --metrics-csv PATH             Optional CSV summary for master/cluster metrics
+```
+
+Examples:
+
+```
+# Manual clusters from manifest column 4
+lutsmith extract-batch pairs.csv -o look.cube --cluster-mode manual
+
+# Auto scene clustering + master LUT + per-cluster LUTs
+lutsmith extract-batch pairs.csv -o look.cube --cluster-mode auto --cluster-count 0 --max-clusters 8
+```
+
 ### Generate a Hald identity image
 
 ```
@@ -131,13 +186,14 @@ Launch the graphical interface:
 lutsmith-gui
 ```
 
-The GUI provides three tabs:
+The GUI provides four tabs:
 
 - **Image Pair** -- Load source/target images, adjust parameters, run extraction, and inspect quality metrics and coverage maps
+- **Batch** -- Load or generate a manifest template, run aggregate extraction, enable manual/auto scene clustering, export master + per-cluster LUTs, and optionally write a metrics CSV summary
 - **Hald CLUT** -- Generate identity images, load processed results, and reconstruct LUTs
 - **Settings** -- Configure output directory, LUT title, and view I/O backend status
 
-The interface uses a dark theme with amber/gold accents. Pipeline execution runs on a background thread with real-time progress updates and a diagnostic log. All solver parameters including prior model, color basis, chroma ratio, and Laplacian connectivity are accessible from the collapsible Advanced panel.
+The interface uses a dark theme with amber/gold accents. Pipeline execution runs on background threads with real-time progress updates and diagnostic logs. All solver parameters including prior model, color basis, chroma ratio, and Laplacian connectivity are accessible from the collapsible Advanced panel on the Image Pair tab; the Batch tab reuses these solver settings and adds batch-specific controls (pair balancing, outlier rejection, clustering mode/count, master export).
 
 ---
 
@@ -425,6 +481,9 @@ src/lutsmith/
     pipeline/
         preprocess.py        Image loading, sanitization, TF detection
         sampling.py          Pixel binning, Welford stats, weight computation
+        batch_manifest.py    CSV manifest parsing (source/target/weight/cluster)
+        clustering.py        Pair-signature extraction + k-means scene clustering
+        reporting.py         Batch metrics table generation + CSV export
         solving.py           Matrix build, baseline/multigrid orchestration
         refinement.py        Optional iterative refit
         validation.py        DeltaE 2000, coverage, LUT health metrics
@@ -445,11 +504,11 @@ src/lutsmith/
         binning.py           JIT-compiled pixel binning (Welford)
         interpolation.py     JIT-compiled LUT interpolation
     cli/
-        app.py               Typer CLI with 4 commands
+        app.py               Typer CLI with extraction, batch extraction, Hald, validation commands
     gui/
         app.py               QApplication entry point
         main_window.py       Main window with tab layout
-        workers.py           QThread pipeline/Hald workers
+        workers.py           QThread workers for image-pair, batch, and Hald workflows
         styles/
             theme.py         Dark theme palette, typography
             qss.py           Qt stylesheets

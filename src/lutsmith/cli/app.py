@@ -2,6 +2,7 @@
 
 Commands:
     extract     - Extract LUT from source/target image pair
+    extract-batch - Extract LUT from many matched source/target pairs
     hald-gen    - Generate Hald CLUT identity image
     hald-recon  - Reconstruct LUT from processed Hald image
     validate    - Validate an existing LUT against image pair
@@ -10,10 +11,11 @@ Commands:
 from __future__ import annotations
 
 import logging
-import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -27,8 +29,9 @@ from lutsmith.core.types import (
     PipelineConfig,
     PriorModel,
     RobustLoss,
-    TransferFunction,
 )
+from lutsmith.pipeline.batch_manifest import ManifestEntry, parse_pair_manifest
+from lutsmith.pipeline.reporting import build_batch_metrics_rows, write_batch_metrics_csv
 
 app = typer.Typer(
     name="lutsmith",
@@ -61,6 +64,135 @@ def main_callback(
 ):
     if verbose:
         logging.getLogger("lutsmith").setLevel(logging.DEBUG)
+
+
+_STAGE_WEIGHTS = {
+    "preprocess": 10,
+    "sampling": 20,
+    "solving": 50,
+    "refinement": 10,
+    "validation": 5,
+    "export": 5,
+}
+
+
+def _resolve_shaper_mode(shaper: str) -> Optional[bool]:
+    """Resolve --shaper option to include_shaper flag."""
+    shaper_mode = shaper.strip().lower()
+    if shaper_mode not in {"auto", "on", "off"}:
+        raise typer.BadParameter("Shaper must be one of: auto, on, off.")
+    if shaper_mode == "on":
+        return True
+    if shaper_mode == "off":
+        return False
+    return None
+
+
+def _build_pipeline_config(
+    *,
+    source: Optional[Path],
+    target: Optional[Path],
+    output: Path,
+    size: int,
+    kernel: str,
+    smoothness: float,
+    prior: float,
+    loss: str,
+    irls_iter: int,
+    bin_res: int,
+    min_samples: int,
+    title: str,
+    refine: bool,
+    format: str,
+    shadow_auto: bool,
+    shadow_threshold: Optional[float],
+    deep_shadow_threshold: Optional[float],
+    prior_model: str,
+    color_basis: str,
+    chroma_ratio: float,
+    laplacian_connectivity: int,
+    shaper: str,
+) -> PipelineConfig:
+    """Create PipelineConfig from shared CLI options."""
+    return PipelineConfig(
+        source_path=source,
+        target_path=target,
+        output_path=output,
+        lut_size=size,
+        kernel=InterpolationKernel(kernel),
+        smoothness=smoothness,
+        prior_strength=prior,
+        robust_loss=RobustLoss(loss),
+        irls_iterations=irls_iter,
+        bin_resolution=bin_res,
+        min_samples_per_bin=min_samples,
+        title=title,
+        enable_refinement=refine,
+        format=ExportFormat(format),
+        include_shaper=_resolve_shaper_mode(shaper),
+        shadow_auto=shadow_auto,
+        shadow_threshold=shadow_threshold,
+        deep_shadow_threshold=deep_shadow_threshold,
+        prior_model=PriorModel(prior_model),
+        color_basis=ColorBasis(color_basis),
+        chroma_smoothness_ratio=chroma_ratio,
+        laplacian_connectivity=laplacian_connectivity,
+    )
+
+
+def _parse_pair_manifest(manifest: Path) -> list[ManifestEntry]:
+    """Parse batch manifest and map parser errors to CLI-friendly exceptions."""
+    try:
+        return parse_pair_manifest(manifest)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _build_progress_callback(progress: Progress, task_id: int):
+    """Create weighted stage-progress callback for pipeline runs."""
+
+    stage_order = list(_STAGE_WEIGHTS.keys())
+
+    def on_progress(stage: str, fraction: float, message: str):
+        base = sum(
+            _STAGE_WEIGHTS[s]
+            for s in stage_order
+            if stage in _STAGE_WEIGHTS and stage_order.index(s) < stage_order.index(stage)
+        )
+        weight = _STAGE_WEIGHTS.get(stage, 0)
+        pct = base + weight * fraction
+        progress.update(
+            task_id,
+            completed=pct,
+            description=f"{stage}: {message}" if message else stage,
+        )
+
+    return on_progress
+
+
+def _cluster_output_path(base_output: Path, cluster_name: str) -> Path:
+    """Generate per-cluster output path based on base output stem."""
+    safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in cluster_name.strip())
+    safe = safe.strip("_") or "cluster"
+    return base_output.with_name(f"{base_output.stem}_{safe}{base_output.suffix}")
+
+
+def _print_batch_result_summary(result, fallback_pairs: int) -> None:
+    """Print metrics + diagnostics summary for batch run result."""
+    console.print()
+    _print_metrics(result.metrics)
+
+    if result.output_path:
+        console.print(f"\n[green]Output:[/green] {result.output_path}")
+
+    pair_count = result.diagnostics.get("num_pairs", fallback_pairs)
+    bins = result.diagnostics.get("occupied_bins", 0)
+    dropped = result.diagnostics.get("outlier_rejection", {}).get("dropped_pair_indices", [])
+    total_time = result.diagnostics.get("total_time", 0)
+    console.print(f"[dim]Pairs: {pair_count}, aggregated bins: {bins}[/dim]")
+    if dropped:
+        console.print(f"[dim]Outliers dropped: {dropped}[/dim]")
+    console.print(f"[dim]Total time: {total_time:.2f}s[/dim]\n")
 
 
 @app.command()
@@ -125,38 +257,29 @@ def extract(
     ),
 ):
     """Extract a 3D LUT from a source/target image pair."""
-    shaper_mode = shaper.strip().lower()
-    if shaper_mode not in {"auto", "on", "off"}:
-        raise typer.BadParameter("Shaper must be one of: auto, on, off.")
-    include_shaper = None
-    if shaper_mode == "on":
-        include_shaper = True
-    elif shaper_mode == "off":
-        include_shaper = False
-
-    config = PipelineConfig(
-        source_path=source,
-        target_path=target,
-        output_path=output,
-        lut_size=size,
-        kernel=InterpolationKernel(kernel),
+    config = _build_pipeline_config(
+        source=source,
+        target=target,
+        output=output,
+        size=size,
+        kernel=kernel,
         smoothness=smoothness,
-        prior_strength=prior,
-        robust_loss=RobustLoss(loss),
-        irls_iterations=irls_iter,
-        bin_resolution=bin_res,
-        min_samples_per_bin=min_samples,
+        prior=prior,
+        loss=loss,
+        irls_iter=irls_iter,
+        bin_res=bin_res,
+        min_samples=min_samples,
         title=title,
-        enable_refinement=refine,
-        format=ExportFormat(format),
-        include_shaper=include_shaper,
+        refine=refine,
+        format=format,
         shadow_auto=shadow_auto,
         shadow_threshold=shadow_threshold,
         deep_shadow_threshold=deep_shadow_threshold,
-        prior_model=PriorModel(prior_model),
-        color_basis=ColorBasis(color_basis),
-        chroma_smoothness_ratio=chroma_ratio,
+        prior_model=prior_model,
+        color_basis=color_basis,
+        chroma_ratio=chroma_ratio,
         laplacian_connectivity=laplacian_connectivity,
+        shaper=shaper,
     )
 
     from lutsmith.pipeline.runner import run_pipeline
@@ -177,24 +300,7 @@ def extract(
         console=console,
     ) as progress:
         task = progress.add_task("Extracting LUT...", total=100)
-
-        def on_progress(stage: str, fraction: float, message: str):
-            stage_weights = {
-                "preprocess": 10,
-                "sampling": 20,
-                "solving": 50,
-                "refinement": 10,
-                "validation": 5,
-                "export": 5,
-            }
-            base = sum(
-                v for k, v in stage_weights.items()
-                if list(stage_weights.keys()).index(k) < list(stage_weights.keys()).index(stage)
-            ) if stage in stage_weights else 0
-            weight = stage_weights.get(stage, 0)
-            pct = base + weight * fraction
-            progress.update(task, completed=pct,
-                            description=f"{stage}: {message}" if message else stage)
+        on_progress = _build_progress_callback(progress, task)
 
         try:
             result = run_pipeline(config, progress_callback=on_progress)
@@ -212,6 +318,297 @@ def extract(
 
     total_time = result.diagnostics.get("total_time", 0)
     console.print(f"[dim]Total time: {total_time:.2f}s[/dim]\n")
+
+
+@app.command("extract-batch")
+def extract_batch(
+    manifest: Path = typer.Argument(
+        ...,
+        help="CSV file with source,target pairs (one pair per line).",
+    ),
+    output: Path = typer.Option("output.cube", "-o", "--output", help="Output LUT path."),
+    size: int = typer.Option(33, "-s", "--size", help="LUT grid size (17, 33, 65)."),
+    kernel: str = typer.Option("tetrahedral", "-k", "--kernel", help="Interpolation kernel."),
+    smoothness: float = typer.Option(0.1, "--smoothness", help="Smoothness (lambda_s)."),
+    prior: float = typer.Option(0.01, "--prior", help="Prior strength (lambda_r)."),
+    loss: str = typer.Option("huber", "--loss", help="Loss function (l2, huber)."),
+    irls_iter: int = typer.Option(3, "--irls-iter", help="IRLS iterations."),
+    bin_res: int = typer.Option(64, "--bin-res", help="Bin resolution per axis."),
+    min_samples: int = typer.Option(3, "--min-samples", help="Min samples per bin."),
+    title: str = typer.Option("LutSmith LUT", "--title", help="LUT title."),
+    refine: bool = typer.Option(False, "--refine", help="Enable iterative refinement."),
+    format: str = typer.Option("cube", "-f", "--format", help="Output format (cube, aml, alf4)."),
+    shadow_auto: bool = typer.Option(
+        True,
+        "--shadow-auto/--shadow-manual",
+        help="Use adaptive shadow thresholds for smoothing/weighting.",
+    ),
+    shadow_threshold: Optional[float] = typer.Option(
+        None,
+        "--shadow-threshold",
+        min=0.0,
+        max=1.0,
+        help="Shadow smoothing threshold (0-1). Overrides auto if set.",
+    ),
+    deep_shadow_threshold: Optional[float] = typer.Option(
+        None,
+        "--deep-shadow-threshold",
+        min=0.0,
+        max=1.0,
+        help="Deep shadow threshold (0-1). Overrides auto if set.",
+    ),
+    prior_model: str = typer.Option(
+        "identity",
+        "--prior-model",
+        help="Prior model: identity, baseline_residual, baseline_multigrid_residual.",
+    ),
+    color_basis: str = typer.Option(
+        "rgb",
+        "--color-basis",
+        help="Regularization color space: rgb, opponent.",
+    ),
+    chroma_ratio: float = typer.Option(
+        4.0,
+        "--chroma-ratio",
+        help="Chroma-to-luma smoothness ratio (opponent mode).",
+    ),
+    laplacian_connectivity: int = typer.Option(
+        6,
+        "--laplacian-connectivity",
+        help="Laplacian connectivity: 6, 18, or 26.",
+    ),
+    shaper: str = typer.Option(
+        "auto",
+        "--shaper",
+        help="1D shaper LUT: auto, on, or off.",
+    ),
+    pair_balance: str = typer.Option(
+        "equal",
+        "--pair-balance",
+        help="Pair contribution mode: equal, by_bins, by_pixels.",
+    ),
+    outlier_sigma: float = typer.Option(
+        0.0,
+        "--outlier-sigma",
+        min=0.0,
+        help="Drop high-error outlier pairs using median+sigma*MAD (0 disables).",
+    ),
+    min_pairs_after_outlier: int = typer.Option(
+        3,
+        "--min-pairs-after-outlier",
+        min=1,
+        help="Minimum number of pairs to keep after outlier rejection.",
+    ),
+    allow_mixed_transfer: bool = typer.Option(
+        False,
+        "--allow-mixed-transfer",
+        help="Allow mixed transfer-function detections across pairs.",
+    ),
+    cluster_mode: str = typer.Option(
+        "none",
+        "--cluster-mode",
+        help="Scene clustering mode: none, manual, auto.",
+    ),
+    cluster_count: int = typer.Option(
+        0,
+        "--cluster-count",
+        min=0,
+        help="Fixed number of clusters for auto mode (0 = choose automatically).",
+    ),
+    max_clusters: int = typer.Option(
+        6,
+        "--max-clusters",
+        min=2,
+        help="Maximum clusters considered when --cluster-count=0 in auto mode.",
+    ),
+    export_master: bool = typer.Option(
+        True,
+        "--export-master/--no-export-master",
+        help="Also export one LUT fit across all pairs when clustering is enabled.",
+    ),
+    cluster_seed: int = typer.Option(
+        42,
+        "--cluster-seed",
+        help="Random seed for auto clustering initialization.",
+    ),
+    metrics_csv: Optional[Path] = typer.Option(
+        None,
+        "--metrics-csv",
+        help="Optional CSV output path for batch/cluster metrics summary.",
+    ),
+):
+    """Extract one LUT from many matched source/target frame pairs."""
+    manifest_entries = _parse_pair_manifest(manifest)
+    pairs = [(entry.source, entry.target) for entry in manifest_entries]
+    pair_weights = [entry.weight for entry in manifest_entries]
+    manual_clusters = [entry.cluster for entry in manifest_entries]
+    config = _build_pipeline_config(
+        source=None,
+        target=None,
+        output=output,
+        size=size,
+        kernel=kernel,
+        smoothness=smoothness,
+        prior=prior,
+        loss=loss,
+        irls_iter=irls_iter,
+        bin_res=bin_res,
+        min_samples=min_samples,
+        title=title,
+        refine=refine,
+        format=format,
+        shadow_auto=shadow_auto,
+        shadow_threshold=shadow_threshold,
+        deep_shadow_threshold=deep_shadow_threshold,
+        prior_model=prior_model,
+        color_basis=color_basis,
+        chroma_ratio=chroma_ratio,
+        laplacian_connectivity=laplacian_connectivity,
+        shaper=shaper,
+    )
+
+    from lutsmith.pipeline.runner import run_multi_pipeline
+    from dataclasses import replace
+    from lutsmith.pipeline.clustering import (
+        auto_cluster_features,
+        compute_pair_signatures,
+        kmeans_cluster_features,
+    )
+
+    cluster_mode = cluster_mode.strip().lower()
+    if cluster_mode not in {"none", "manual", "auto"}:
+        raise typer.BadParameter("cluster-mode must be one of: none, manual, auto")
+    if cluster_count > 0 and cluster_mode != "auto":
+        raise typer.BadParameter("--cluster-count is only valid with --cluster-mode auto")
+
+    console.print(f"\n[bold]LutSmith Batch LUT Extraction[/bold]")
+    console.print(f"  Manifest: {manifest}")
+    console.print(f"  Pairs:    {len(pairs)}")
+    console.print(f"  Clusters: {cluster_mode}")
+    console.print(f"  Balance:  {pair_balance}")
+    if outlier_sigma > 0:
+        console.print(f"  Outliers: sigma={outlier_sigma:.2f} (min keep={min_pairs_after_outlier})")
+    console.print(f"  Size:     {size}^3 = {size**3:,} nodes")
+    console.print(f"  Kernel:   {kernel}")
+    console.print(f"  Loss:     {loss}")
+    console.print()
+
+    def _run_batch_job(
+        job_label: str,
+        job_pairs: list[tuple[Path, Path]],
+        job_weights: list[float],
+        job_config: PipelineConfig,
+    ):
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(f"Extracting {job_label}...", total=100)
+            on_progress = _build_progress_callback(progress, task)
+            result = run_multi_pipeline(
+                job_pairs,
+                job_config,
+                progress_callback=on_progress,
+                pair_weights=job_weights,
+                pair_balance=pair_balance,
+                outlier_sigma=outlier_sigma,
+                min_pairs_after_outlier=min_pairs_after_outlier,
+                allow_mixed_transfer=allow_mixed_transfer,
+            )
+            progress.update(task, completed=100, description=f"{job_label} complete")
+            return result
+
+    try:
+        master_result = None
+        cluster_results = []
+        if cluster_mode == "none":
+            master_result = _run_batch_job("master", pairs, pair_weights, config)
+            _print_batch_result_summary(master_result, fallback_pairs=len(pairs))
+        else:
+            # Build assignments for clustered runs.
+            assignments = None
+            clustering_diag = {}
+            if cluster_mode == "manual":
+                if any(c is None or not str(c).strip() for c in manual_clusters):
+                    raise typer.BadParameter(
+                        "Manual clustering requires a cluster label for every manifest row "
+                        "(4th CSV column)."
+                    )
+                label_to_id = {}
+                next_id = 0
+                assignments = []
+                for label in manual_clusters:
+                    key = str(label).strip()
+                    if key not in label_to_id:
+                        label_to_id[key] = next_id
+                        next_id += 1
+                    assignments.append(label_to_id[key])
+                assignments = np.array(assignments, dtype=np.int64)
+                id_to_label = {v: k for k, v in label_to_id.items()}
+                clustering_diag = {"mode": "manual", "k": len(label_to_id)}
+            else:
+                console.print("[dim]Computing pair signatures for auto clustering...[/dim]")
+                signatures, _ = compute_pair_signatures(pairs, config)
+                if cluster_count > 0:
+                    assignments, clustering_diag = kmeans_cluster_features(
+                        signatures, k=cluster_count, random_seed=cluster_seed,
+                    )
+                    clustering_diag["mode"] = "auto_fixed"
+                else:
+                    assignments, clustering_diag = auto_cluster_features(
+                        signatures,
+                        max_clusters=max_clusters,
+                        random_seed=cluster_seed,
+                    )
+                    clustering_diag["mode"] = "auto"
+                id_to_label = {i: f"cluster_{i + 1:02d}" for i in sorted(set(assignments.tolist()))}
+
+            groups: dict[int, list[int]] = defaultdict(list)
+            for i, cid in enumerate(assignments.tolist()):
+                groups[int(cid)].append(i)
+
+            console.print(
+                f"[cyan]Clustering:[/cyan] {clustering_diag.get('mode', cluster_mode)}, "
+                f"k={len(groups)}"
+            )
+            for cid in sorted(groups):
+                label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
+                console.print(f"  - {label}: {len(groups[cid])} pairs")
+
+            results = []
+            if export_master:
+                master_result = _run_batch_job("master", pairs, pair_weights, config)
+                results.append(("master", master_result))
+
+            for cid in sorted(groups):
+                idxs = groups[cid]
+                cluster_label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
+                cluster_pairs = [pairs[i] for i in idxs]
+                cluster_weights = [pair_weights[i] for i in idxs]
+                cluster_output = _cluster_output_path(output, cluster_label)
+                cluster_title = f"{title} [{cluster_label}]"
+                cluster_config = replace(config, output_path=cluster_output, title=cluster_title)
+                cluster_result = _run_batch_job(cluster_label, cluster_pairs, cluster_weights, cluster_config)
+                cluster_result.diagnostics["cluster_label"] = cluster_label
+                cluster_result.diagnostics["cluster_indices"] = [i + 1 for i in idxs]
+                cluster_results.append(cluster_result)
+                results.append((cluster_label, cluster_result))
+
+            for label, result in results:
+                console.print(f"\n[bold]{label}[/bold]")
+                _print_batch_result_summary(result, fallback_pairs=len(pairs))
+
+        if metrics_csv is not None:
+            rows = build_batch_metrics_rows(master_result, cluster_results)
+            write_batch_metrics_csv(rows, metrics_csv)
+            console.print(f"[green]Metrics CSV:[/green] {metrics_csv}")
+
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        raise typer.Exit(code=1)
 
 
 @app.command("hald-gen")

@@ -16,7 +16,7 @@ try:
         QFileDialog, QMessageBox, QStatusBar,
         QPushButton, QLabel, QGroupBox,
         QFormLayout, QLineEdit, QSpinBox,
-        QComboBox, QCheckBox, QScrollArea, QFrame,
+        QComboBox, QCheckBox, QScrollArea, QFrame, QDoubleSpinBox,
     )
 except ImportError:
     raise ImportError("PySide6 is required for the GUI.")
@@ -39,7 +39,9 @@ from lutsmith.gui.widgets.log_viewer import LogViewer
 from lutsmith.gui.widgets.metrics_view import MetricsDisplay
 from lutsmith.gui.widgets.parameters import ParameterPanel
 from lutsmith.gui.widgets.progress import PipelineProgress
-from lutsmith.gui.workers import PipelineWorker, HaldWorker
+from lutsmith.gui.workers import PipelineWorker, HaldWorker, BatchPipelineWorker
+from lutsmith.pipeline.batch_manifest import parse_pair_manifest
+from lutsmith.pipeline.reporting import build_batch_metrics_rows, write_batch_metrics_csv
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +57,12 @@ class MainWindow(QMainWindow):
 
         self._settings = QSettings("LutSmith", "LutSmith")
         self._worker: Optional[PipelineWorker] = None
+        self._batch_worker: Optional[BatchPipelineWorker] = None
         self._hald_worker: Optional[HaldWorker] = None
         self._source_path: Optional[Path] = None
         self._target_path: Optional[Path] = None
         self._last_result: Optional[PipelineResult] = None
+        self._batch_metrics_csv_output: Optional[Path] = None
 
         self._setup_ui()
         self._setup_menu()
@@ -77,10 +81,13 @@ class MainWindow(QMainWindow):
         # Tab 1: Image Pair workflow
         self._tabs.addTab(self._build_image_pair_tab(), "Image Pair")
 
-        # Tab 2: Hald CLUT workflow
+        # Tab 2: Batch workflow
+        self._tabs.addTab(self._build_batch_tab(), "Batch")
+
+        # Tab 3: Hald CLUT workflow
         self._tabs.addTab(self._build_hald_tab(), "Hald CLUT")
 
-        # Tab 3: Settings
+        # Tab 4: Settings
         self._tabs.addTab(self._build_settings_tab(), "Settings")
 
     def _build_image_pair_tab(self) -> QWidget:
@@ -164,6 +171,149 @@ class MainWindow(QMainWindow):
         splitter.setSizes([700, 350])
 
         layout.addWidget(splitter)
+        return tab
+
+    def _build_batch_tab(self) -> QWidget:
+        """Build batch extraction tab with optional scene clustering."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        layout.setSpacing(SPACING_SM)
+
+        manifest_group = QGroupBox("Batch Manifest")
+        manifest_form = QFormLayout(manifest_group)
+        manifest_form.setSpacing(SPACING_SM)
+
+        manifest_row = QHBoxLayout()
+        self._batch_manifest_path = QLineEdit()
+        self._batch_manifest_path.setPlaceholderText("pairs.csv (source,target[,weight][,cluster])")
+        manifest_row.addWidget(self._batch_manifest_path, 1)
+        self._btn_browse_batch_manifest = QPushButton("Browse...")
+        self._btn_browse_batch_manifest.setFixedWidth(80)
+        manifest_row.addWidget(self._btn_browse_batch_manifest)
+        self._btn_batch_manifest_template = QPushButton("Template...")
+        self._btn_batch_manifest_template.setFixedWidth(90)
+        manifest_row.addWidget(self._btn_batch_manifest_template)
+        manifest_form.addRow("Manifest:", manifest_row)
+
+        self._batch_manifest_hint = QLabel(
+            "Use one CSV line per pair. Optional columns: weight and manual cluster label."
+        )
+        self._batch_manifest_hint.setWordWrap(True)
+        self._batch_manifest_hint.setStyleSheet(f"color: {PALETTE.text_secondary}; font-size: 11px;")
+        manifest_form.addRow("", self._batch_manifest_hint)
+        layout.addWidget(manifest_group)
+
+        cluster_group = QGroupBox("Scene Clustering")
+        cluster_form = QFormLayout(cluster_group)
+        cluster_form.setSpacing(SPACING_SM)
+
+        self._batch_cluster_mode = QComboBox()
+        self._batch_cluster_mode.addItems(["none", "manual", "auto"])
+        self._batch_cluster_mode.setToolTip("none: single LUT, manual: use manifest cluster column, auto: feature-based clustering")
+        cluster_form.addRow("Mode:", self._batch_cluster_mode)
+
+        self._batch_cluster_count = QSpinBox()
+        self._batch_cluster_count.setRange(0, 20)
+        self._batch_cluster_count.setSpecialValueText("Auto")
+        self._batch_cluster_count.setToolTip("Fixed clusters for auto mode (0 chooses automatically)")
+        cluster_form.addRow("Cluster Count:", self._batch_cluster_count)
+
+        self._batch_max_clusters = QSpinBox()
+        self._batch_max_clusters.setRange(2, 20)
+        self._batch_max_clusters.setValue(6)
+        self._batch_max_clusters.setToolTip("Maximum clusters considered when Cluster Count is Auto")
+        cluster_form.addRow("Max Clusters:", self._batch_max_clusters)
+
+        self._batch_cluster_seed = QSpinBox()
+        self._batch_cluster_seed.setRange(0, 999999)
+        self._batch_cluster_seed.setValue(42)
+        self._batch_cluster_seed.setToolTip("Random seed for auto clustering")
+        cluster_form.addRow("Cluster Seed:", self._batch_cluster_seed)
+
+        self._batch_export_master = QCheckBox("Export master LUT (all pairs)")
+        self._batch_export_master.setChecked(True)
+        cluster_form.addRow("", self._batch_export_master)
+
+        layout.addWidget(cluster_group)
+
+        robustness_group = QGroupBox("Robustness")
+        robust_form = QFormLayout(robustness_group)
+        robust_form.setSpacing(SPACING_SM)
+
+        self._batch_pair_balance = QComboBox()
+        self._batch_pair_balance.addItems(["equal", "by_bins", "by_pixels"])
+        self._batch_pair_balance.setToolTip("How each pair contributes to the aggregate fit")
+        robust_form.addRow("Pair Balance:", self._batch_pair_balance)
+
+        self._batch_outlier_sigma = QDoubleSpinBox()
+        self._batch_outlier_sigma.setRange(0.0, 10.0)
+        self._batch_outlier_sigma.setSingleStep(0.1)
+        self._batch_outlier_sigma.setValue(0.0)
+        self._batch_outlier_sigma.setToolTip("Outlier pair rejection threshold (median + sigma*MAD). 0 disables")
+        robust_form.addRow("Outlier Sigma:", self._batch_outlier_sigma)
+
+        self._batch_min_pairs = QSpinBox()
+        self._batch_min_pairs.setRange(1, 1000)
+        self._batch_min_pairs.setValue(3)
+        self._batch_min_pairs.setToolTip("Minimum pairs retained after outlier rejection")
+        robust_form.addRow("Min Pairs:", self._batch_min_pairs)
+
+        self._batch_allow_mixed_tf = QCheckBox("Allow mixed transfer-function detections")
+        robust_form.addRow("", self._batch_allow_mixed_tf)
+        layout.addWidget(robustness_group)
+
+        metrics_group = QGroupBox("Batch Metrics Export")
+        metrics_form = QFormLayout(metrics_group)
+        metrics_form.setSpacing(SPACING_SM)
+
+        self._batch_export_metrics_csv = QCheckBox("Export metrics CSV")
+        self._batch_export_metrics_csv.setChecked(True)
+        self._batch_export_metrics_csv.setToolTip("Write master/cluster quality summary to CSV")
+        metrics_form.addRow("", self._batch_export_metrics_csv)
+
+        csv_row = QHBoxLayout()
+        self._batch_metrics_csv_path = QLineEdit()
+        self._batch_metrics_csv_path.setPlaceholderText("Auto: <output_stem>_batch_metrics.csv")
+        csv_row.addWidget(self._batch_metrics_csv_path, 1)
+        self._btn_browse_batch_metrics_csv = QPushButton("Browse...")
+        self._btn_browse_batch_metrics_csv.setFixedWidth(80)
+        csv_row.addWidget(self._btn_browse_batch_metrics_csv)
+        metrics_form.addRow("CSV Path:", csv_row)
+
+        layout.addWidget(metrics_group)
+
+        self._batch_hint = QLabel(
+            "Batch uses the same solver parameters as the Image Pair tab. "
+            "Adjust LUT size, prior model, basis, and smoothing there."
+        )
+        self._batch_hint.setWordWrap(True)
+        self._batch_hint.setStyleSheet(f"color: {PALETTE.text_secondary}; font-size: 11px;")
+        layout.addWidget(self._batch_hint)
+
+        self._batch_progress = PipelineProgress()
+        layout.addWidget(self._batch_progress)
+
+        self._batch_metrics = MetricsDisplay()
+        layout.addWidget(self._batch_metrics)
+
+        self._batch_log = LogViewer()
+        layout.addWidget(self._batch_log, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING_SM)
+        self._btn_batch_extract = QPushButton("Extract Batch LUTs")
+        self._btn_batch_extract.setProperty("class", "primary")
+        self._btn_batch_extract.setMinimumHeight(36)
+        self._btn_batch_cancel = QPushButton("Cancel")
+        self._btn_batch_cancel.setEnabled(False)
+        self._btn_batch_cancel.setMinimumHeight(36)
+        btn_row.addWidget(self._btn_batch_extract)
+        btn_row.addWidget(self._btn_batch_cancel)
+        layout.addLayout(btn_row)
+
+        self._update_batch_cluster_controls()
+        self._update_batch_metrics_controls()
         return tab
 
     def _build_hald_tab(self) -> QWidget:
@@ -330,6 +480,15 @@ class MainWindow(QMainWindow):
             lambda t: self._btn_reconstruct.setEnabled(bool(t))
         )
 
+        # Batch tab
+        self._btn_browse_batch_manifest.clicked.connect(self._browse_batch_manifest)
+        self._btn_batch_manifest_template.clicked.connect(self._save_batch_manifest_template)
+        self._btn_browse_batch_metrics_csv.clicked.connect(self._browse_batch_metrics_csv)
+        self._btn_batch_extract.clicked.connect(self._start_batch_extraction)
+        self._btn_batch_cancel.clicked.connect(self._cancel_batch_extraction)
+        self._batch_cluster_mode.currentTextChanged.connect(self._update_batch_cluster_controls)
+        self._batch_export_metrics_csv.stateChanged.connect(self._update_batch_metrics_controls)
+
     # ------------------------------------------------------------------
     # Image loading
     # ------------------------------------------------------------------
@@ -393,7 +552,7 @@ class MainWindow(QMainWindow):
             return
 
         # Build config from parameter panel
-        config = self._build_config()
+        config = self._build_config(self._source_path, self._target_path)
 
         if config.include_shaper is True and config.format != ExportFormat.CUBE:
             self._log.append(
@@ -419,7 +578,11 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
-    def _build_config(self) -> PipelineConfig:
+    def _build_config(
+        self,
+        source_path: Optional[Path],
+        target_path: Optional[Path],
+    ) -> PipelineConfig:
         """Assemble PipelineConfig from current GUI state."""
         output_dir = self._output_dir.text() or "."
         fmt_str = self._params.get_format_string()
@@ -444,8 +607,8 @@ class MainWindow(QMainWindow):
             deep_shadow_threshold = self._params.deep_shadow_threshold.value()
 
         return PipelineConfig(
-            source_path=self._source_path,
-            target_path=self._target_path,
+            source_path=source_path,
+            target_path=target_path,
             output_path=output_path,
             format=ExportFormat(fmt_str),
             title=resolved_title,
@@ -513,6 +676,218 @@ class MainWindow(QMainWindow):
             self._source_path is not None and self._target_path is not None
         )
         self._btn_cancel.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Batch execution
+    # ------------------------------------------------------------------
+
+    def _update_batch_cluster_controls(self):
+        mode = self._batch_cluster_mode.currentText().strip().lower()
+        auto = mode == "auto"
+        self._batch_cluster_count.setEnabled(auto)
+        self._batch_max_clusters.setEnabled(auto)
+        self._batch_cluster_seed.setEnabled(auto)
+
+    def _update_batch_metrics_controls(self):
+        enabled = self._batch_export_metrics_csv.isChecked()
+        self._batch_metrics_csv_path.setEnabled(enabled)
+        self._btn_browse_batch_metrics_csv.setEnabled(enabled)
+
+    def _default_batch_metrics_csv_path(self, config: PipelineConfig) -> Path:
+        output_path = Path(config.output_path) if config.output_path is not None else Path("output.cube")
+        return output_path.with_name(f"{output_path.stem}_batch_metrics.csv")
+
+    @Slot()
+    def _browse_batch_manifest(self):
+        last_dir = self._settings.value("last_image_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Batch Manifest",
+            last_dir,
+            "CSV (*.csv);;All Files (*)",
+        )
+        if path:
+            self._settings.setValue("last_image_dir", str(Path(path).parent))
+            self._batch_manifest_path.setText(path)
+
+    @Slot()
+    def _save_batch_manifest_template(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        default_name = Path(last_dir) / "pairs_template.csv" if last_dir else "pairs_template.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Batch Manifest Template",
+            str(default_name),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        template = (
+            "source,target,weight,cluster\n"
+            "restored/frame_0001.png,original/frame_0001.png,1.0,scene_a\n"
+            "restored/frame_0002.png,original/frame_0002.png,1.0,scene_a\n"
+            "restored/frame_0003.png,original/frame_0003.png,0.8,scene_b\n"
+        )
+        out.write_text(template, encoding="utf-8")
+        self._settings.setValue("last_output_dir", str(out.parent))
+        self._batch_log.append(f"Manifest template saved: {out}", "success")
+
+    @Slot()
+    def _browse_batch_metrics_csv(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        default_name = Path(last_dir) / "batch_metrics.csv" if last_dir else "batch_metrics.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Batch Metrics CSV",
+            str(default_name),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if path:
+            self._settings.setValue("last_output_dir", str(Path(path).parent))
+            self._batch_metrics_csv_path.setText(path)
+
+    @Slot()
+    def _start_batch_extraction(self):
+        manifest_text = self._batch_manifest_path.text().strip()
+        if not manifest_text:
+            QMessageBox.warning(self, "Batch Extraction", "Select a manifest CSV first.")
+            return
+
+        manifest_path = Path(manifest_text)
+        try:
+            entries = parse_pair_manifest(manifest_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Manifest Error", str(e))
+            return
+
+        if len(entries) < 1:
+            QMessageBox.warning(self, "Batch Extraction", "Manifest has no valid pairs.")
+            return
+
+        config = self._build_config(None, None)
+        mode = self._batch_cluster_mode.currentText().strip().lower()
+        cluster_count = self._batch_cluster_count.value()
+        max_clusters = self._batch_max_clusters.value()
+        cluster_seed = self._batch_cluster_seed.value()
+        export_master = self._batch_export_master.isChecked()
+        pair_balance = self._batch_pair_balance.currentText()
+        outlier_sigma = self._batch_outlier_sigma.value()
+        min_pairs = self._batch_min_pairs.value()
+        allow_mixed = self._batch_allow_mixed_tf.isChecked()
+        export_metrics_csv = self._batch_export_metrics_csv.isChecked()
+        metrics_path_text = self._batch_metrics_csv_path.text().strip()
+        self._batch_metrics_csv_output = None
+        if export_metrics_csv:
+            self._batch_metrics_csv_output = (
+                Path(metrics_path_text)
+                if metrics_path_text
+                else self._default_batch_metrics_csv_path(config)
+            )
+            self._batch_log.append(f"Metrics CSV: {self._batch_metrics_csv_output}", "info")
+
+        self._batch_log.append_separator()
+        self._batch_log.append(f"Manifest: {manifest_path}", "info")
+        self._batch_log.append(f"Pairs: {len(entries)}", "info")
+        self._batch_log.append(f"Cluster mode: {mode}", "info")
+        self._batch_progress.reset()
+        self._batch_metrics.clear()
+
+        self._btn_batch_extract.setEnabled(False)
+        self._btn_batch_cancel.setEnabled(True)
+        self._status_label.setText("Running batch extraction...")
+
+        self._batch_worker = BatchPipelineWorker(
+            entries,
+            config,
+            cluster_mode=mode,
+            cluster_count=cluster_count,
+            max_clusters=max_clusters,
+            export_master=export_master,
+            cluster_seed=cluster_seed,
+            pair_balance=pair_balance,
+            outlier_sigma=outlier_sigma,
+            min_pairs_after_outlier=min_pairs,
+            allow_mixed_transfer=allow_mixed,
+            parent=self,
+        )
+        self._batch_worker.progress_updated.connect(self._on_batch_progress)
+        self._batch_worker.log_message.connect(self._on_batch_log)
+        self._batch_worker.finished_ok.connect(self._on_batch_done)
+        self._batch_worker.finished_error.connect(self._on_batch_error)
+        self._batch_worker.finished.connect(self._on_batch_worker_finished)
+        self._batch_worker.start()
+
+    @Slot()
+    def _cancel_batch_extraction(self):
+        if self._batch_worker and self._batch_worker.isRunning():
+            self._batch_worker.cancel()
+            self._batch_log.append("Cancellation requested...", "warning")
+            self._status_label.setText("Cancelling batch...")
+
+    @Slot(str, float, str)
+    def _on_batch_progress(self, stage: str, fraction: float, message: str):
+        self._batch_progress.update_stage(stage, fraction, message)
+
+    @Slot(str, str)
+    def _on_batch_log(self, message: str, severity: str):
+        self._batch_log.append(message, severity)
+
+    @Slot(object)
+    def _on_batch_done(self, payload: dict):
+        self._batch_progress.set_complete()
+        master = payload.get("master")
+        clusters = payload.get("clusters", [])
+
+        chosen = master
+        if chosen is None and clusters:
+            chosen = clusters[0]
+
+        if chosen is not None:
+            self._batch_metrics.update_metrics(chosen.metrics)
+
+        if master and master.output_path:
+            self._batch_log.append(f"Master LUT: {master.output_path}", "success")
+            self._status_label.setText(f"Batch complete: {master.output_path.name}")
+
+        for cluster_result in clusters:
+            label = cluster_result.diagnostics.get("cluster_label", "cluster")
+            if cluster_result.output_path:
+                self._batch_log.append(f"{label}: {cluster_result.output_path}", "success")
+                if master is None:
+                    self._status_label.setText(f"Batch complete: {cluster_result.output_path.name}")
+            self._batch_log.append(
+                f"{label} mean dE={cluster_result.metrics.mean_delta_e:.2f}",
+                "info",
+            )
+
+        clustering = payload.get("clustering", {})
+        if clustering:
+            k = clustering.get("k")
+            mode = clustering.get("mode", "n/a")
+            self._batch_log.append(f"Clustering summary: mode={mode}, k={k}", "info")
+
+        if self._batch_metrics_csv_output is not None:
+            try:
+                rows = build_batch_metrics_rows(master, clusters)
+                csv_path = write_batch_metrics_csv(rows, self._batch_metrics_csv_output)
+                self._batch_log.append(f"Metrics CSV saved: {csv_path}", "success")
+            except Exception as e:
+                self._batch_log.append(f"Failed to write metrics CSV: {e}", "error")
+
+    @Slot(str)
+    def _on_batch_error(self, error_msg: str):
+        self._batch_progress.set_error("solving", error_msg[:40])
+        self._status_label.setText("Batch error")
+        QMessageBox.warning(self, "Batch Pipeline Error", error_msg)
+
+    @Slot()
+    def _on_batch_worker_finished(self):
+        self._btn_batch_extract.setEnabled(True)
+        self._btn_batch_cancel.setEnabled(False)
+        self._batch_metrics_csv_output = None
 
     # ------------------------------------------------------------------
     # Hald CLUT workflow

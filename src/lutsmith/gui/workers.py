@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import threading
 import traceback
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 try:
     from PySide6.QtCore import QThread, Signal
 except ImportError:
@@ -20,6 +23,7 @@ from lutsmith.core.types import (
     RobustLoss,
     TransferFunction,
 )
+from lutsmith.pipeline.batch_manifest import ManifestEntry
 
 
 class PipelineWorker(QThread):
@@ -176,6 +180,204 @@ class HaldWorker(QThread):
                 "lut_size": final_size,
             })
 
+        except Exception as e:
+            self.log_message.emit(f"Error: {e}", "error")
+            self.finished_error.emit(str(e))
+
+
+class BatchPipelineWorker(QThread):
+    """Runs batch/clustered LUT extraction in the background."""
+
+    progress_updated = Signal(str, float, str)
+    log_message = Signal(str, str)
+    finished_ok = Signal(object)  # dict with master/clusters/clustering
+    finished_error = Signal(str)
+
+    def __init__(
+        self,
+        manifest_entries: list[ManifestEntry],
+        config: PipelineConfig,
+        cluster_mode: str = "none",
+        cluster_count: int = 0,
+        max_clusters: int = 6,
+        export_master: bool = True,
+        cluster_seed: int = 42,
+        pair_balance: str = "equal",
+        outlier_sigma: float = 0.0,
+        min_pairs_after_outlier: int = 3,
+        allow_mixed_transfer: bool = False,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._entries = manifest_entries
+        self._config = config
+        self._cluster_mode = cluster_mode
+        self._cluster_count = cluster_count
+        self._max_clusters = max_clusters
+        self._export_master = export_master
+        self._cluster_seed = cluster_seed
+        self._pair_balance = pair_balance
+        self._outlier_sigma = outlier_sigma
+        self._min_pairs_after_outlier = min_pairs_after_outlier
+        self._allow_mixed_transfer = allow_mixed_transfer
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def _cluster_output_path(self, base_output: Path, cluster_name: str) -> Path:
+        safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in cluster_name.strip())
+        safe = safe.strip("_") or "cluster"
+        return base_output.with_name(f"{base_output.stem}_{safe}{base_output.suffix}")
+
+    def _run_job(
+        self,
+        label: str,
+        pairs: list[tuple[Path, Path]],
+        weights: list[float],
+        config: PipelineConfig,
+    ):
+        from lutsmith.pipeline.runner import run_multi_pipeline
+
+        self.log_message.emit(
+            f"Running {label}: {len(pairs)} pairs, output={config.output_path}",
+            "stage",
+        )
+
+        def on_progress(stage: str, fraction: float, message: str):
+            msg = f"{label}: {message}" if message else label
+            self.progress_updated.emit(stage, fraction, msg)
+
+        result = run_multi_pipeline(
+            pairs,
+            config,
+            progress_callback=on_progress,
+            cancel_check=lambda: self._cancel_event.is_set(),
+            pair_weights=weights,
+            pair_balance=self._pair_balance,
+            outlier_sigma=self._outlier_sigma,
+            min_pairs_after_outlier=self._min_pairs_after_outlier,
+            allow_mixed_transfer=self._allow_mixed_transfer,
+        )
+        return result
+
+    def run(self):
+        try:
+            if not self._entries:
+                raise ValueError("No manifest entries provided")
+
+            from lutsmith.pipeline.clustering import (
+                auto_cluster_features,
+                compute_pair_signatures,
+                kmeans_cluster_features,
+            )
+
+            pairs = [(e.source, e.target) for e in self._entries]
+            weights = [float(e.weight) for e in self._entries]
+            manual_clusters = [e.cluster for e in self._entries]
+
+            self.log_message.emit(
+                f"Batch extraction started: pairs={len(pairs)}, mode={self._cluster_mode}",
+                "stage",
+            )
+
+            mode = self._cluster_mode.strip().lower()
+            if mode not in {"none", "manual", "auto"}:
+                raise ValueError(f"Invalid cluster mode: {self._cluster_mode}")
+
+            outputs = {
+                "master": None,
+                "clusters": [],
+                "clustering": {},
+            }
+
+            if mode == "none":
+                result = self._run_job("master", pairs, weights, self._config)
+                outputs["master"] = result
+                self.log_message.emit("Batch extraction complete", "success")
+                self.finished_ok.emit(outputs)
+                return
+
+            if mode == "manual":
+                if any(c is None or not str(c).strip() for c in manual_clusters):
+                    raise ValueError(
+                        "Manual clustering requires a cluster label for every manifest row."
+                    )
+                label_to_id = {}
+                assignments = []
+                next_id = 0
+                for c in manual_clusters:
+                    key = str(c).strip()
+                    if key not in label_to_id:
+                        label_to_id[key] = next_id
+                        next_id += 1
+                    assignments.append(label_to_id[key])
+                assignments = np.array(assignments, dtype=np.int64)
+                id_to_label = {v: k for k, v in label_to_id.items()}
+                outputs["clustering"] = {"mode": "manual", "k": len(label_to_id)}
+            else:
+                self.log_message.emit("Computing pair signatures for auto clustering...", "info")
+
+                def on_sig_progress(fraction: float, message: str):
+                    self.progress_updated.emit("preprocess", fraction, f"cluster: {message}")
+
+                signatures, _ = compute_pair_signatures(
+                    pairs,
+                    self._config,
+                    progress_callback=on_sig_progress,
+                    cancel_check=lambda: self._cancel_event.is_set(),
+                )
+                if self._cluster_count > 0:
+                    assignments, diag = kmeans_cluster_features(
+                        signatures,
+                        k=self._cluster_count,
+                        random_seed=self._cluster_seed,
+                    )
+                    diag["mode"] = "auto_fixed"
+                else:
+                    assignments, diag = auto_cluster_features(
+                        signatures,
+                        max_clusters=self._max_clusters,
+                        random_seed=self._cluster_seed,
+                    )
+                    diag["mode"] = "auto"
+                outputs["clustering"] = diag
+                id_to_label = {i: f"cluster_{i + 1:02d}" for i in sorted(set(assignments.tolist()))}
+
+            groups: dict[int, list[int]] = defaultdict(list)
+            for i, cid in enumerate(assignments.tolist()):
+                groups[int(cid)].append(i)
+
+            self.log_message.emit(f"Clustering complete: {len(groups)} cluster(s)", "info")
+            for cid in sorted(groups):
+                label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
+                self.log_message.emit(f"  {label}: {len(groups[cid])} pairs", "info")
+
+            if self._export_master:
+                outputs["master"] = self._run_job("master", pairs, weights, self._config)
+
+            for cid in sorted(groups):
+                if self._cancel_event.is_set():
+                    raise RuntimeError("Cancelled")
+                label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
+                idxs = groups[cid]
+                c_pairs = [pairs[i] for i in idxs]
+                c_weights = [weights[i] for i in idxs]
+                if self._config.output_path is None:
+                    raise ValueError("Batch config missing output_path")
+                c_output = self._cluster_output_path(Path(self._config.output_path), label)
+                c_config = replace(
+                    self._config,
+                    output_path=c_output,
+                    title=f"{self._config.title} [{label}]",
+                )
+                c_result = self._run_job(label, c_pairs, c_weights, c_config)
+                c_result.diagnostics["cluster_label"] = label
+                c_result.diagnostics["cluster_indices"] = [i + 1 for i in idxs]
+                outputs["clusters"].append(c_result)
+
+            self.log_message.emit("Batch extraction complete", "success")
+            self.finished_ok.emit(outputs)
         except Exception as e:
             self.log_message.emit(f"Error: {e}", "error")
             self.finished_error.emit(str(e))
