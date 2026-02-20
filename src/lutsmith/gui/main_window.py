@@ -40,9 +40,19 @@ from lutsmith.gui.widgets.log_viewer import LogViewer
 from lutsmith.gui.widgets.metrics_view import MetricsDisplay
 from lutsmith.gui.widgets.parameters import ParameterPanel
 from lutsmith.gui.widgets.progress import PipelineProgress
-from lutsmith.gui.workers import PipelineWorker, HaldWorker, BatchPipelineWorker
+from lutsmith.gui.workers import (
+    BatchPipelineWorker,
+    HaldWorker,
+    PipelineWorker,
+    RoutingWorker,
+)
 from lutsmith.pipeline.batch_manifest import parse_pair_manifest
-from lutsmith.pipeline.reporting import build_batch_metrics_rows, write_batch_metrics_csv
+from lutsmith.pipeline.reporting import (
+    build_batch_metrics_rows,
+    read_cluster_centroids_csv,
+    write_batch_metrics_csv,
+)
+from lutsmith.pipeline.routing import parse_shot_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +69,7 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("LutSmith", "LutSmith")
         self._worker: Optional[PipelineWorker] = None
         self._batch_worker: Optional[BatchPipelineWorker] = None
+        self._routing_worker: Optional[RoutingWorker] = None
         self._hald_worker: Optional[HaldWorker] = None
         self._source_path: Optional[Path] = None
         self._target_path: Optional[Path] = None
@@ -85,10 +96,13 @@ class MainWindow(QMainWindow):
         # Tab 2: Batch workflow
         self._tabs.addTab(self._build_batch_tab(), "Batch")
 
-        # Tab 3: Hald CLUT workflow
+        # Tab 3: Shot routing workflow
+        self._tabs.addTab(self._build_routing_tab(), "Routing")
+
+        # Tab 4: Hald CLUT workflow
         self._tabs.addTab(self._build_hald_tab(), "Hald CLUT")
 
-        # Tab 4: Settings
+        # Tab 5: Settings
         self._tabs.addTab(self._build_settings_tab(), "Settings")
 
     def _build_image_pair_tab(self) -> QWidget:
@@ -238,6 +252,24 @@ class MainWindow(QMainWindow):
         self._batch_export_master.setChecked(True)
         cluster_form.addRow("", self._batch_export_master)
 
+        self._batch_export_cluster_artifacts = QCheckBox("Export cluster artifact CSVs")
+        self._batch_export_cluster_artifacts.setChecked(True)
+        self._batch_export_cluster_artifacts.setToolTip(
+            "Write pair assignments and centroid signatures for routing"
+        )
+        cluster_form.addRow("", self._batch_export_cluster_artifacts)
+
+        artifacts_row = QHBoxLayout()
+        self._batch_cluster_artifacts_prefix = QLineEdit()
+        self._batch_cluster_artifacts_prefix.setPlaceholderText(
+            "Auto: <output_stem> (for *_cluster_assignments.csv and *_cluster_centroids.csv)"
+        )
+        artifacts_row.addWidget(self._batch_cluster_artifacts_prefix, 1)
+        self._btn_browse_batch_cluster_artifacts_prefix = QPushButton("Browse...")
+        self._btn_browse_batch_cluster_artifacts_prefix.setFixedWidth(80)
+        artifacts_row.addWidget(self._btn_browse_batch_cluster_artifacts_prefix)
+        cluster_form.addRow("Artifacts Prefix:", artifacts_row)
+
         layout.addWidget(cluster_group)
 
         robustness_group = QGroupBox("Robustness")
@@ -346,6 +378,147 @@ class MainWindow(QMainWindow):
 
         self._update_batch_cluster_controls()
         self._update_batch_metrics_controls()
+        self._update_batch_cluster_artifact_controls()
+        return tab
+
+    def _build_routing_tab(self) -> QWidget:
+        """Build shot routing tab for cluster LUT assignment."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        layout.setSpacing(SPACING_SM)
+
+        manifest_group = QGroupBox("Shot Manifest")
+        manifest_form = QFormLayout(manifest_group)
+        manifest_form.setSpacing(SPACING_SM)
+
+        manifest_row = QHBoxLayout()
+        self._routing_manifest_path = QLineEdit()
+        self._routing_manifest_path.setPlaceholderText(
+            "shots.csv (shot_id,frame_path[,transfer_fn])"
+        )
+        manifest_row.addWidget(self._routing_manifest_path, 1)
+        self._btn_browse_routing_manifest = QPushButton("Browse...")
+        self._btn_browse_routing_manifest.setFixedWidth(80)
+        manifest_row.addWidget(self._btn_browse_routing_manifest)
+        self._btn_routing_manifest_template = QPushButton("Template...")
+        self._btn_routing_manifest_template.setFixedWidth(90)
+        manifest_row.addWidget(self._btn_routing_manifest_template)
+        manifest_form.addRow("Manifest:", manifest_row)
+
+        manifest_hint = QLabel(
+            "Use one row per representative frame. Reuse shot_id for multiple frames per shot."
+        )
+        manifest_hint.setWordWrap(True)
+        manifest_hint.setStyleSheet(f"color: {PALETTE.text_secondary}; font-size: 11px;")
+        manifest_form.addRow("", manifest_hint)
+        layout.addWidget(manifest_group)
+
+        centroid_group = QGroupBox("Cluster Centroids")
+        centroid_form = QFormLayout(centroid_group)
+        centroid_form.setSpacing(SPACING_SM)
+
+        centroids_row = QHBoxLayout()
+        self._routing_centroids_path = QLineEdit()
+        self._routing_centroids_path.setPlaceholderText(
+            "Use *_cluster_centroids.csv from Batch extraction"
+        )
+        centroids_row.addWidget(self._routing_centroids_path, 1)
+        self._btn_browse_routing_centroids = QPushButton("Browse...")
+        self._btn_browse_routing_centroids.setFixedWidth(80)
+        centroids_row.addWidget(self._btn_browse_routing_centroids)
+        centroid_form.addRow("Centroids:", centroids_row)
+        layout.addWidget(centroid_group)
+
+        routing_group = QGroupBox("Routing Parameters")
+        routing_form = QFormLayout(routing_group)
+        routing_form.setSpacing(SPACING_SM)
+
+        output_row = QHBoxLayout()
+        self._routing_output_path = QLineEdit()
+        self._routing_output_path.setPlaceholderText("Auto: <manifest_stem>_routing.csv")
+        output_row.addWidget(self._routing_output_path, 1)
+        self._btn_browse_routing_output = QPushButton("Browse...")
+        self._btn_browse_routing_output.setFixedWidth(80)
+        output_row.addWidget(self._btn_browse_routing_output)
+        routing_form.addRow("Output CSV:", output_row)
+
+        self._routing_transfer_fn = QComboBox()
+        self._routing_transfer_fn.addItems(
+            [tf.value for tf in TransferFunction]
+        )
+        self._routing_transfer_fn.setCurrentText(TransferFunction.AUTO.value)
+        self._routing_transfer_fn.setToolTip("Default transfer function for shots without per-row overrides")
+        routing_form.addRow("Default Transfer:", self._routing_transfer_fn)
+
+        self._routing_shaper_mode = QComboBox()
+        self._routing_shaper_mode.addItems(["auto", "on", "off"])
+        self._routing_shaper_mode.setCurrentText("auto")
+        self._routing_shaper_mode.setToolTip("Shaper handling during shot signature preprocessing")
+        routing_form.addRow("Shaper:", self._routing_shaper_mode)
+
+        self._routing_temporal_window = QSpinBox()
+        self._routing_temporal_window.setRange(1, 25)
+        self._routing_temporal_window.setValue(3)
+        self._routing_temporal_window.setToolTip("Moving-average window over shot distance tracks")
+        routing_form.addRow("Temporal Window:", self._routing_temporal_window)
+
+        self._routing_switch_penalty = QDoubleSpinBox()
+        self._routing_switch_penalty.setRange(0.0, 10.0)
+        self._routing_switch_penalty.setSingleStep(0.05)
+        self._routing_switch_penalty.setValue(0.2)
+        self._routing_switch_penalty.setToolTip("Penalty for changing assigned cluster between adjacent shots")
+        routing_form.addRow("Switch Penalty:", self._routing_switch_penalty)
+        layout.addWidget(routing_group)
+
+        self._routing_progress = PipelineProgress()
+        layout.addWidget(self._routing_progress)
+
+        summary_group = QGroupBox("Routing Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setSpacing(SPACING_SM)
+
+        self._routing_summary_table = QTableWidget(0, 6)
+        self._routing_summary_table.setHorizontalHeaderLabels(
+            ["Shot", "Cluster", "Distance", "Margin", "Frames", "LUT Path"]
+        )
+        self._routing_summary_table.setSortingEnabled(True)
+        self._routing_summary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._routing_summary_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._routing_summary_table.verticalHeader().setVisible(False)
+        route_header = self._routing_summary_table.horizontalHeader()
+        route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        summary_layout.addWidget(self._routing_summary_table)
+
+        route_btn_row = QHBoxLayout()
+        route_btn_row.addStretch()
+        self._btn_open_routing_output_folder = QPushButton("Open Output Folder")
+        self._btn_open_routing_output_folder.setEnabled(False)
+        route_btn_row.addWidget(self._btn_open_routing_output_folder)
+        summary_layout.addLayout(route_btn_row)
+        layout.addWidget(summary_group)
+
+        self._routing_log = LogViewer()
+        layout.addWidget(self._routing_log, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING_SM)
+        self._btn_route_shots = QPushButton("Route Shots")
+        self._btn_route_shots.setProperty("class", "primary")
+        self._btn_route_shots.setMinimumHeight(36)
+        self._btn_route_cancel = QPushButton("Cancel")
+        self._btn_route_cancel.setEnabled(False)
+        self._btn_route_cancel.setMinimumHeight(36)
+        btn_row.addWidget(self._btn_route_shots)
+        btn_row.addWidget(self._btn_route_cancel)
+        layout.addLayout(btn_row)
+
+        self._update_routing_controls()
         return tab
 
     def _build_hald_tab(self) -> QWidget:
@@ -516,12 +689,31 @@ class MainWindow(QMainWindow):
         self._btn_browse_batch_manifest.clicked.connect(self._browse_batch_manifest)
         self._btn_batch_manifest_template.clicked.connect(self._save_batch_manifest_template)
         self._btn_browse_batch_metrics_csv.clicked.connect(self._browse_batch_metrics_csv)
+        self._btn_browse_batch_cluster_artifacts_prefix.clicked.connect(
+            self._browse_batch_cluster_artifacts_prefix
+        )
         self._btn_batch_extract.clicked.connect(self._start_batch_extraction)
         self._btn_batch_cancel.clicked.connect(self._cancel_batch_extraction)
         self._batch_cluster_mode.currentTextChanged.connect(self._update_batch_cluster_controls)
         self._batch_export_metrics_csv.stateChanged.connect(self._update_batch_metrics_controls)
+        self._batch_export_cluster_artifacts.stateChanged.connect(
+            self._update_batch_cluster_artifact_controls
+        )
         self._batch_summary_table.itemSelectionChanged.connect(self._update_batch_output_folder_button)
         self._btn_open_batch_output_folder.clicked.connect(self._open_selected_batch_output_folder)
+
+        # Routing tab
+        self._btn_browse_routing_manifest.clicked.connect(self._browse_routing_manifest)
+        self._btn_routing_manifest_template.clicked.connect(self._save_routing_manifest_template)
+        self._btn_browse_routing_centroids.clicked.connect(self._browse_routing_centroids)
+        self._btn_browse_routing_output.clicked.connect(self._browse_routing_output)
+        self._routing_manifest_path.textChanged.connect(self._on_routing_manifest_changed)
+        self._routing_centroids_path.textChanged.connect(self._update_routing_controls)
+        self._routing_output_path.textChanged.connect(self._update_routing_output_folder_button)
+        self._btn_route_shots.clicked.connect(self._start_shot_routing)
+        self._btn_route_cancel.clicked.connect(self._cancel_shot_routing)
+        self._routing_summary_table.itemSelectionChanged.connect(self._update_routing_output_folder_button)
+        self._btn_open_routing_output_folder.clicked.connect(self._open_routing_output_folder)
 
     # ------------------------------------------------------------------
     # Image loading
@@ -721,6 +913,13 @@ class MainWindow(QMainWindow):
         self._batch_cluster_count.setEnabled(auto)
         self._batch_max_clusters.setEnabled(auto)
         self._batch_cluster_seed.setEnabled(auto)
+        self._update_batch_cluster_artifact_controls()
+
+    def _update_batch_cluster_artifact_controls(self):
+        mode = self._batch_cluster_mode.currentText().strip().lower()
+        enabled = self._batch_export_cluster_artifacts.isChecked() and mode in {"manual", "auto"}
+        self._batch_cluster_artifacts_prefix.setEnabled(enabled)
+        self._btn_browse_batch_cluster_artifacts_prefix.setEnabled(enabled)
 
     def _update_batch_metrics_controls(self):
         enabled = self._batch_export_metrics_csv.isChecked()
@@ -730,6 +929,10 @@ class MainWindow(QMainWindow):
     def _default_batch_metrics_csv_path(self, config: PipelineConfig) -> Path:
         output_path = Path(config.output_path) if config.output_path is not None else Path("output.cube")
         return output_path.with_name(f"{output_path.stem}_batch_metrics.csv")
+
+    def _default_batch_cluster_artifacts_prefix(self, config: PipelineConfig) -> Path:
+        output_path = Path(config.output_path) if config.output_path is not None else Path("output.cube")
+        return output_path.with_suffix("")
 
     @Slot()
     def _browse_batch_manifest(self):
@@ -784,6 +987,24 @@ class MainWindow(QMainWindow):
             self._batch_metrics_csv_path.setText(path)
 
     @Slot()
+    def _browse_batch_cluster_artifacts_prefix(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        default_name = Path(last_dir) / "cluster_artifacts" if last_dir else "cluster_artifacts"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select Cluster Artifacts Prefix",
+            str(default_name),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix:
+            out = out.with_suffix("")
+        self._settings.setValue("last_output_dir", str(out.parent))
+        self._batch_cluster_artifacts_prefix.setText(str(out))
+
+    @Slot()
     def _start_batch_extraction(self):
         manifest_text = self._batch_manifest_path.text().strip()
         if not manifest_text:
@@ -813,6 +1034,16 @@ class MainWindow(QMainWindow):
         allow_mixed = self._batch_allow_mixed_tf.isChecked()
         export_metrics_csv = self._batch_export_metrics_csv.isChecked()
         metrics_path_text = self._batch_metrics_csv_path.text().strip()
+        export_cluster_artifacts = self._batch_export_cluster_artifacts.isChecked() and mode in {"manual", "auto"}
+        artifacts_prefix_text = self._batch_cluster_artifacts_prefix.text().strip()
+        artifacts_prefix = None
+        if export_cluster_artifacts:
+            artifacts_prefix = (
+                Path(artifacts_prefix_text)
+                if artifacts_prefix_text
+                else self._default_batch_cluster_artifacts_prefix(config)
+            )
+            self._batch_log.append(f"Cluster artifacts prefix: {artifacts_prefix}", "info")
         self._batch_metrics_csv_output = None
         if export_metrics_csv:
             self._batch_metrics_csv_output = (
@@ -847,6 +1078,8 @@ class MainWindow(QMainWindow):
             outlier_sigma=outlier_sigma,
             min_pairs_after_outlier=min_pairs,
             allow_mixed_transfer=allow_mixed,
+            export_cluster_artifacts=export_cluster_artifacts,
+            cluster_artifacts_prefix=artifacts_prefix,
             parent=self,
         )
         self._batch_worker.progress_updated.connect(self._on_batch_progress)
@@ -975,6 +1208,17 @@ class MainWindow(QMainWindow):
             mode = clustering.get("mode", "n/a")
             self._batch_log.append(f"Clustering summary: mode={mode}, k={k}", "info")
 
+        artifacts = payload.get("cluster_artifacts", {})
+        if artifacts:
+            assign_csv = artifacts.get("assignments_csv")
+            cent_csv = artifacts.get("centroids_csv")
+            if assign_csv:
+                self._batch_log.append(f"Cluster assignments CSV: {assign_csv}", "success")
+            if cent_csv:
+                self._batch_log.append(f"Cluster centroids CSV: {cent_csv}", "success")
+                self._routing_centroids_path.setText(str(cent_csv))
+                self._routing_log.append(f"Centroids loaded from batch: {cent_csv}", "info")
+
         if self._batch_metrics_csv_output is not None:
             try:
                 rows = build_batch_metrics_rows(master, clusters)
@@ -995,6 +1239,278 @@ class MainWindow(QMainWindow):
         self._btn_batch_extract.setEnabled(True)
         self._btn_batch_cancel.setEnabled(False)
         self._batch_metrics_csv_output = None
+
+    # ------------------------------------------------------------------
+    # Shot routing execution
+    # ------------------------------------------------------------------
+
+    def _routing_include_shaper(self) -> Optional[bool]:
+        mode = self._routing_shaper_mode.currentText().strip().lower()
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return None
+
+    def _update_routing_controls(self):
+        manifest_ready = bool(self._routing_manifest_path.text().strip())
+        centroids_ready = bool(self._routing_centroids_path.text().strip())
+        can_run = manifest_ready and centroids_ready
+        self._btn_route_shots.setEnabled(can_run and not self._btn_route_cancel.isEnabled())
+
+    def _default_routing_output_path(self, manifest_path: Path) -> Path:
+        out_dir = Path(self._output_dir.text()) if self._output_dir.text().strip() else manifest_path.parent
+        return out_dir / f"{manifest_path.stem}_routing.csv"
+
+    def _resolved_routing_output_path(self) -> Optional[Path]:
+        output_text = self._routing_output_path.text().strip()
+        if output_text:
+            return Path(output_text)
+        manifest_text = self._routing_manifest_path.text().strip()
+        if not manifest_text:
+            return None
+        return self._default_routing_output_path(Path(manifest_text))
+
+    @Slot(str)
+    def _on_routing_manifest_changed(self, _text: str):
+        if not self._routing_output_path.text().strip():
+            manifest_text = self._routing_manifest_path.text().strip()
+            if manifest_text:
+                self._routing_output_path.setText(str(self._default_routing_output_path(Path(manifest_text))))
+        self._update_routing_controls()
+        self._update_routing_output_folder_button()
+
+    @Slot()
+    def _browse_routing_manifest(self):
+        last_dir = self._settings.value("last_image_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Shot Manifest",
+            last_dir,
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        self._settings.setValue("last_image_dir", str(Path(path).parent))
+        self._routing_manifest_path.setText(path)
+
+    @Slot()
+    def _save_routing_manifest_template(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        default_name = Path(last_dir) / "shots_template.csv" if last_dir else "shots_template.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Shot Manifest Template",
+            str(default_name),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        template = (
+            "shot_id,frame_path,transfer_fn\n"
+            "001,restored/shot001_ref.png,log_c4\n"
+            "001,restored/shot001_alt.png,log_c4\n"
+            "002,restored/shot002_ref.png,auto\n"
+            "003,restored/shot003_ref.png,auto\n"
+        )
+        out.write_text(template, encoding="utf-8")
+        self._settings.setValue("last_output_dir", str(out.parent))
+        self._routing_log.append(f"Routing manifest template saved: {out}", "success")
+
+    @Slot()
+    def _browse_routing_centroids(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Cluster Centroids CSV",
+            last_dir,
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        self._settings.setValue("last_output_dir", str(Path(path).parent))
+        self._routing_centroids_path.setText(path)
+        self._update_routing_controls()
+
+    @Slot()
+    def _browse_routing_output(self):
+        last_dir = self._settings.value("last_output_dir", "")
+        default_name = Path(last_dir) / "shot_routing.csv" if last_dir else "shot_routing.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Shot Routing CSV",
+            str(default_name),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        self._settings.setValue("last_output_dir", str(Path(path).parent))
+        self._routing_output_path.setText(path)
+
+    @Slot()
+    def _start_shot_routing(self):
+        manifest_text = self._routing_manifest_path.text().strip()
+        centroids_text = self._routing_centroids_path.text().strip()
+        if not manifest_text:
+            QMessageBox.warning(self, "Shot Routing", "Select a shot manifest CSV first.")
+            return
+        if not centroids_text:
+            QMessageBox.warning(self, "Shot Routing", "Select a cluster centroids CSV first.")
+            return
+
+        manifest_path = Path(manifest_text)
+        centroids_path = Path(centroids_text)
+        output_path = self._resolved_routing_output_path()
+        if output_path is None:
+            QMessageBox.warning(self, "Shot Routing", "Select a routing output path.")
+            return
+
+        try:
+            entries = parse_shot_manifest(manifest_path)
+            centroid_rows, centroid_appearance = read_cluster_centroids_csv(centroids_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Shot Routing", str(e))
+            return
+
+        config = PipelineConfig(
+            transfer_function=TransferFunction(self._routing_transfer_fn.currentText()),
+            include_shaper=self._routing_include_shaper(),
+        )
+
+        self._routing_log.append_separator()
+        self._routing_log.append(f"Shots manifest: {manifest_path}", "info")
+        self._routing_log.append(f"Centroids: {centroids_path}", "info")
+        self._routing_log.append(f"Output CSV: {output_path}", "info")
+        self._routing_log.append(f"Shots: {len(entries)}", "info")
+        self._routing_log.append(f"Clusters: {len(centroid_rows)}", "info")
+        self._routing_progress.reset()
+        self._routing_summary_table.setRowCount(0)
+        self._update_routing_output_folder_button()
+
+        self._btn_route_shots.setEnabled(False)
+        self._btn_route_cancel.setEnabled(True)
+        self._status_label.setText("Routing shots...")
+
+        self._routing_worker = RoutingWorker(
+            entries,
+            centroid_rows,
+            centroid_appearance,
+            config,
+            output_path=output_path,
+            temporal_window=self._routing_temporal_window.value(),
+            switch_penalty=self._routing_switch_penalty.value(),
+            parent=self,
+        )
+        self._routing_worker.progress_updated.connect(self._on_routing_progress)
+        self._routing_worker.log_message.connect(self._on_routing_log)
+        self._routing_worker.finished_ok.connect(self._on_routing_done)
+        self._routing_worker.finished_error.connect(self._on_routing_error)
+        self._routing_worker.finished.connect(self._on_routing_worker_finished)
+        self._routing_worker.start()
+
+    @Slot()
+    def _cancel_shot_routing(self):
+        if self._routing_worker and self._routing_worker.isRunning():
+            self._routing_worker.cancel()
+            self._routing_log.append("Cancellation requested...", "warning")
+            self._status_label.setText("Cancelling routing...")
+
+    @Slot(str, float, str)
+    def _on_routing_progress(self, stage: str, fraction: float, message: str):
+        self._routing_progress.update_stage(stage, fraction, message)
+
+    @Slot(str, str)
+    def _on_routing_log(self, message: str, severity: str):
+        self._routing_log.append(message, severity)
+
+    def _populate_routing_summary_table(self, rows: list[dict]):
+        self._routing_summary_table.setSortingEnabled(False)
+        self._routing_summary_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            shot_item = QTableWidgetItem(row.get("shot_id", ""))
+            self._routing_summary_table.setItem(r, 0, shot_item)
+
+            cluster_item = QTableWidgetItem(row.get("cluster_label", ""))
+            self._routing_summary_table.setItem(r, 1, cluster_item)
+
+            dist_text = row.get("distance", "")
+            dist_item = QTableWidgetItem(dist_text)
+            try:
+                dist_item.setData(Qt.ItemDataRole.UserRole, float(dist_text))
+            except Exception:
+                pass
+            self._routing_summary_table.setItem(r, 2, dist_item)
+
+            margin_text = row.get("confidence_margin", "")
+            margin_item = QTableWidgetItem(margin_text)
+            try:
+                margin_item.setData(Qt.ItemDataRole.UserRole, float(margin_text))
+            except Exception:
+                pass
+            self._routing_summary_table.setItem(r, 3, margin_item)
+
+            frames_text = row.get("frame_count", "")
+            frames_item = QTableWidgetItem(frames_text)
+            try:
+                frames_item.setData(Qt.ItemDataRole.UserRole, int(frames_text))
+            except Exception:
+                pass
+            self._routing_summary_table.setItem(r, 4, frames_item)
+
+            lut_path = row.get("lut_path", "")
+            lut_item = QTableWidgetItem(lut_path)
+            lut_item.setData(Qt.ItemDataRole.UserRole, lut_path)
+            self._routing_summary_table.setItem(r, 5, lut_item)
+
+        self._routing_summary_table.setSortingEnabled(True)
+        if rows:
+            self._routing_summary_table.selectRow(0)
+        self._update_routing_output_folder_button()
+
+    def _update_routing_output_folder_button(self):
+        output_path = self._resolved_routing_output_path()
+        self._btn_open_routing_output_folder.setEnabled(output_path is not None)
+
+    @Slot()
+    def _open_routing_output_folder(self):
+        output_path = self._resolved_routing_output_path()
+        if output_path is None:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path.parent.resolve())))
+
+    @Slot(object)
+    def _on_routing_done(self, payload: dict):
+        self._routing_progress.set_complete()
+        rows = payload.get("rows", [])
+        self._populate_routing_summary_table(rows)
+
+        out_text = payload.get("output_path", "")
+        if out_text:
+            self._routing_output_path.setText(out_text)
+            self._routing_log.append(f"Routing CSV: {out_text}", "success")
+            self._status_label.setText(f"Routing complete: {Path(out_text).name}")
+        else:
+            self._status_label.setText("Routing complete")
+        self._routing_log.append(
+            f"Cluster switches: {payload.get('cluster_switches', 0)}",
+            "info",
+        )
+
+    @Slot(str)
+    def _on_routing_error(self, error_msg: str):
+        self._routing_progress.set_error("solving", error_msg[:40])
+        self._status_label.setText("Routing error")
+        self._update_routing_output_folder_button()
+        QMessageBox.warning(self, "Routing Error", error_msg)
+
+    @Slot()
+    def _on_routing_worker_finished(self):
+        self._btn_route_cancel.setEnabled(False)
+        self._update_routing_controls()
+        self._update_routing_output_folder_button()
 
     # ------------------------------------------------------------------
     # Hald CLUT workflow

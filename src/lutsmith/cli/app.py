@@ -3,6 +3,7 @@
 Commands:
     extract     - Extract LUT from source/target image pair
     extract-batch - Extract LUT from many matched source/target pairs
+    route-shots - Route shots to clustered LUTs using centroid signatures
     hald-gen    - Generate Hald CLUT identity image
     hald-recon  - Reconstruct LUT from processed Hald image
     validate    - Validate an existing LUT against image pair
@@ -29,9 +30,18 @@ from lutsmith.core.types import (
     PipelineConfig,
     PriorModel,
     RobustLoss,
+    TransferFunction,
 )
 from lutsmith.pipeline.batch_manifest import ManifestEntry, parse_pair_manifest
-from lutsmith.pipeline.reporting import build_batch_metrics_rows, write_batch_metrics_csv
+from lutsmith.pipeline.reporting import (
+    build_batch_metrics_rows,
+    build_cluster_assignment_rows,
+    build_cluster_centroid_rows,
+    read_cluster_centroids_csv,
+    write_batch_metrics_csv,
+    write_cluster_assignments_csv,
+    write_cluster_centroids_csv,
+)
 
 app = typer.Typer(
     name="lutsmith",
@@ -436,6 +446,16 @@ def extract_batch(
         "--metrics-csv",
         help="Optional CSV output path for batch/cluster metrics summary.",
     ),
+    export_cluster_artifacts: bool = typer.Option(
+        True,
+        "--export-cluster-artifacts/--no-export-cluster-artifacts",
+        help="Export pair assignments and cluster centroid/signature CSVs when clustering.",
+    ),
+    cluster_artifacts_prefix: Optional[Path] = typer.Option(
+        None,
+        "--cluster-artifacts-prefix",
+        help="Optional output prefix for cluster artifact CSVs (without extension).",
+    ),
 ):
     """Extract one LUT from many matched source/target frame pairs."""
     manifest_entries = _parse_pair_manifest(manifest)
@@ -531,13 +551,27 @@ def extract_batch(
     try:
         master_result = None
         cluster_results = []
+        signature_matrix = None
+        signature_meta = None
+        assignments = None
+        id_to_label = None
         if cluster_mode == "none":
             master_result = _run_batch_job("master", list(range(len(pairs))), config)
             _print_batch_result_summary(master_result, fallback_pairs=len(pairs))
         else:
             # Build assignments for clustered runs.
-            assignments = None
             clustering_diag = {}
+            need_signatures = (cluster_mode == "auto") or export_cluster_artifacts
+
+            if need_signatures:
+                console.print("[dim]Computing pair signatures...[/dim]")
+                signature_matrix, signature_meta = compute_pair_signatures(
+                    pairs,
+                    config,
+                    pair_transfer_fns=pair_transfer_fns,
+                    pair_normalization_modes=pair_normalizations,
+                )
+
             if cluster_mode == "manual":
                 if any(c is None or not str(c).strip() for c in manual_clusters):
                     raise typer.BadParameter(
@@ -557,13 +591,7 @@ def extract_batch(
                 id_to_label = {v: k for k, v in label_to_id.items()}
                 clustering_diag = {"mode": "manual", "k": len(label_to_id)}
             else:
-                console.print("[dim]Computing pair signatures for auto clustering...[/dim]")
-                signatures, _ = compute_pair_signatures(
-                    pairs,
-                    config,
-                    pair_transfer_fns=pair_transfer_fns,
-                    pair_normalization_modes=pair_normalizations,
-                )
+                signatures = signature_matrix
                 if cluster_count > 0:
                     assignments, clustering_diag = kmeans_cluster_features(
                         signatures, k=cluster_count, random_seed=cluster_seed,
@@ -611,6 +639,50 @@ def extract_batch(
                 console.print(f"\n[bold]{label}[/bold]")
                 _print_batch_result_summary(result, fallback_pairs=len(pairs))
 
+            if export_cluster_artifacts and assignments is not None and id_to_label is not None:
+                # Use explicit prefix if provided, otherwise derive from output stem.
+                base_prefix = cluster_artifacts_prefix or output.with_suffix("")
+                assignments_path = base_prefix.parent / f"{base_prefix.name}_cluster_assignments.csv"
+                centroids_path = base_prefix.parent / f"{base_prefix.name}_cluster_centroids.csv"
+
+                cluster_lut_paths = {}
+                if master_result is not None and master_result.output_path is not None:
+                    cluster_lut_paths["master"] = str(master_result.output_path)
+                for cr in cluster_results:
+                    lbl = str(cr.diagnostics.get("cluster_label", ""))
+                    if lbl and cr.output_path is not None:
+                        cluster_lut_paths[lbl] = str(cr.output_path)
+
+                if signature_matrix is None or signature_meta is None:
+                    signature_matrix, signature_meta = compute_pair_signatures(
+                        pairs,
+                        config,
+                        pair_transfer_fns=pair_transfer_fns,
+                        pair_normalization_modes=pair_normalizations,
+                    )
+                app_matrix = np.asarray(
+                    [m.get("appearance_signature", [0.0] * 8) for m in signature_meta],
+                    dtype=np.float64,
+                )
+
+                assignment_rows = build_cluster_assignment_rows(
+                    manifest_entries,
+                    assignments,
+                    id_to_label,
+                    signature_meta=signature_meta,
+                )
+                centroid_rows = build_cluster_centroid_rows(
+                    assignments,
+                    signature_matrix,
+                    app_matrix,
+                    id_to_label,
+                    cluster_lut_paths=cluster_lut_paths,
+                )
+                write_cluster_assignments_csv(assignment_rows, assignments_path)
+                write_cluster_centroids_csv(centroid_rows, centroids_path)
+                console.print(f"[green]Cluster Assignments CSV:[/green] {assignments_path}")
+                console.print(f"[green]Cluster Centroids CSV:[/green] {centroids_path}")
+
         if metrics_csv is not None:
             rows = build_batch_metrics_rows(master_result, cluster_results)
             write_batch_metrics_csv(rows, metrics_csv)
@@ -619,6 +691,116 @@ def extract_batch(
     except Exception as e:
         console.print(f"\n[red]Error:[/red] {e}")
         raise typer.Exit(code=1)
+
+
+@app.command("route-shots")
+def route_shots(
+    shots_manifest: Path = typer.Argument(
+        ...,
+        help="CSV with frame_path or shot_id,frame_path[,transfer_fn] rows.",
+    ),
+    cluster_centroids_csv: Path = typer.Argument(
+        ...,
+        help="Cluster centroid/signature CSV from extract-batch.",
+    ),
+    output: Path = typer.Option(
+        "shot_routing.csv",
+        "-o",
+        "--output",
+        help="Output routing CSV path.",
+    ),
+    transfer_fn: str = typer.Option(
+        "auto",
+        "--transfer-fn",
+        help="Default transfer function for shot frames (auto|linear|log_c3|log_c4|slog3|vlog|unknown).",
+    ),
+    shaper: str = typer.Option(
+        "auto",
+        "--shaper",
+        help="Shaper handling for signature preprocessing: auto, on, off.",
+    ),
+    temporal_window: int = typer.Option(
+        1,
+        "--temporal-window",
+        min=1,
+        help="Moving-average window on shot-to-cluster distance tracks.",
+    ),
+    switch_penalty: float = typer.Option(
+        0.0,
+        "--switch-penalty",
+        min=0.0,
+        help="Penalty for changing cluster between adjacent shots (temporal Viterbi smoothing).",
+    ),
+):
+    """Route shots to clustered LUTs using source appearance signatures."""
+    from lutsmith.pipeline.routing import parse_shot_manifest, run_shot_routing
+
+    try:
+        shot_entries = parse_shot_manifest(shots_manifest)
+        centroid_rows, centroid_appearance = read_cluster_centroids_csv(cluster_centroids_csv)
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    try:
+        tf_enum = TransferFunction(transfer_fn.strip().lower())
+    except ValueError as e:
+        console.print(f"\n[red]Error:[/red] Invalid transfer-fn: {transfer_fn}")
+        raise typer.Exit(code=1) from e
+
+    route_config = PipelineConfig(
+        transfer_function=tf_enum,
+        include_shaper=_resolve_shaper_mode(shaper),
+    )
+
+    console.print(f"\n[bold]LutSmith Shot Routing[/bold]")
+    console.print(f"  Shots manifest: {shots_manifest}")
+    console.print(f"  Centroids:      {cluster_centroids_csv}")
+    console.print(f"  Shots rows:     {len(shot_entries)}")
+    console.print(f"  Clusters:       {len(centroid_rows)}")
+    console.print(f"  Temporal win:   {temporal_window}")
+    console.print(f"  Switch penalty: {switch_penalty:.3f}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Routing shots...", total=100)
+
+        stage_offset = {"preprocess": 0.0, "solving": 80.0, "export": 95.0}
+        stage_scale = {"preprocess": 80.0, "solving": 15.0, "export": 5.0}
+
+        def on_progress(stage: str, fraction: float, message: str):
+            base = stage_offset.get(stage, 0.0)
+            scale = stage_scale.get(stage, 0.0)
+            completed = min(base + scale * max(0.0, min(1.0, fraction)), 100.0)
+            progress.update(task, completed=completed, description=message or stage)
+
+        try:
+            routing_result = run_shot_routing(
+                shot_entries,
+                centroid_rows,
+                centroid_appearance,
+                route_config,
+                output_path=output,
+                temporal_window=temporal_window,
+                switch_penalty=switch_penalty,
+                progress_callback=on_progress,
+            )
+            progress.update(task, completed=100, description="Complete")
+        except Exception as e:
+            console.print(f"\n[red]Error:[/red] {e}")
+            raise typer.Exit(code=1)
+
+    console.print(f"[green]Routing CSV:[/green] {routing_result.output_path or output}")
+    console.print(
+        f"[dim]Shots: {len(routing_result.rows)}, "
+        f"cluster switches: {routing_result.cluster_switches}[/dim]\n"
+    )
 
 
 @app.command("hald-gen")

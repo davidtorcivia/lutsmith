@@ -145,6 +145,10 @@ Scene-clustered extraction options:
                                  Export aggregate LUT in addition to per-cluster LUTs
   --cluster-seed INT             Random seed for auto clustering [default: 42]
   --metrics-csv PATH             Optional CSV summary for master/cluster metrics
+  --export-cluster-artifacts/--no-export-cluster-artifacts
+                                 Export pair assignment and centroid/signature CSVs
+  --cluster-artifacts-prefix PATH
+                                 Output prefix for cluster artifact CSVs
 ```
 
 Examples:
@@ -156,6 +160,33 @@ lutsmith extract-batch pairs.csv -o look.cube --cluster-mode manual
 # Auto scene clustering + master LUT + per-cluster LUTs
 lutsmith extract-batch pairs.csv -o look.cube --cluster-mode auto --cluster-count 0 --max-clusters 8
 ```
+
+Cluster artifact outputs:
+
+- `<prefix>_cluster_assignments.csv`: one row per source/target pair with assigned cluster.
+- `<prefix>_cluster_centroids.csv`: per-cluster transform and appearance centroids plus LUT path.
+
+These files are produced by default when clustering is enabled and can be used for routing new shots.
+
+### Route shots to cluster LUTs
+
+Use representative frame(s) per shot:
+
+```
+# shots.csv
+shot_id,frame_path,transfer_fn
+001,restored/shot001_ref.png,log_c4
+002,restored/shot002_ref.png,log_c4
+003,restored/shot003_ref.png,auto
+```
+
+Then route:
+
+```
+lutsmith route-shots shots.csv look_cluster_centroids.csv -o shot_routing.csv --temporal-window 3 --switch-penalty 0.2
+```
+
+Routing output includes shot id, selected cluster label, LUT path, distance, and confidence margin.
 
 ### Generate a Hald identity image
 
@@ -196,14 +227,15 @@ Launch the graphical interface:
 lutsmith-gui
 ```
 
-The GUI provides four tabs:
+The GUI provides five tabs:
 
 - **Image Pair** -- Load source/target images, adjust parameters, run extraction, and inspect quality metrics and coverage maps
-- **Batch** -- Load or generate a manifest template, run aggregate extraction, set per-pair overrides, enable manual/auto scene clustering, export master + per-cluster LUTs, optionally write a metrics CSV summary, and review a sortable batch summary table (dE/coverage/time) with one-click output-folder open
+- **Batch** -- Load or generate a manifest template, run aggregate extraction, set per-pair overrides, enable manual/auto scene clustering, export master + per-cluster LUTs, control cluster artifact CSV export/prefix, optionally write a metrics CSV summary, and review a sortable batch summary table (dE/coverage/time) with one-click output-folder open
+- **Routing** -- Load a shot manifest and cluster centroids CSV, configure transfer/shaper + temporal smoothing, run shot-to-cluster assignment, export routing CSV, and review a sortable routing summary (distance/confidence/frame-count)
 - **Hald CLUT** -- Generate identity images, load processed results, and reconstruct LUTs
 - **Settings** -- Configure output directory, LUT title, and view I/O backend status
 
-The interface uses a dark theme with amber/gold accents. Pipeline execution runs on background threads with real-time progress updates and diagnostic logs. All solver parameters including prior model, color basis, chroma ratio, and Laplacian connectivity are accessible from the collapsible Advanced panel on the Image Pair tab; the Batch tab reuses these solver settings and adds batch-specific controls (pair balancing, outlier rejection, clustering mode/count, master export).
+The interface uses a dark theme with amber/gold accents. Pipeline execution runs on background threads with real-time progress updates and diagnostic logs. All solver parameters including prior model, color basis, chroma ratio, and Laplacian connectivity are accessible from the collapsible Advanced panel on the Image Pair tab; the Batch tab reuses these solver settings and adds batch-specific controls (pair balancing, outlier rejection, clustering mode/count, master export, artifact export). Routing is fully available in the GUI, so cluster assignment can be completed end-to-end without CLI commands.
 
 ---
 
@@ -495,6 +527,7 @@ src/lutsmith/
         clustering.py        Pair-signature extraction + k-means scene clustering
         normalization.py     Per-pair normalization (none/luma_affine/rgb_affine)
         reporting.py         Batch metrics table generation + CSV export
+        routing.py           Shot-to-cluster LUT routing with temporal smoothing
         solving.py           Matrix build, baseline/multigrid orchestration
         refinement.py        Optional iterative refit
         validation.py        DeltaE 2000, coverage, LUT health metrics
@@ -518,8 +551,8 @@ src/lutsmith/
         app.py               Typer CLI with extraction, batch extraction, Hald, validation commands
     gui/
         app.py               QApplication entry point
-        main_window.py       Main window with tab layout
-        workers.py           QThread workers for image-pair, batch, and Hald workflows
+        main_window.py       Main window with Image Pair, Batch, Routing, Hald, Settings tabs
+        workers.py           QThread workers for image-pair, batch, routing, and Hald workflows
         styles/
             theme.py         Dark theme palette, typography
             qss.py           Qt stylesheets

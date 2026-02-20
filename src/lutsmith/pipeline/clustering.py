@@ -83,6 +83,34 @@ def pair_signature_from_bins(bins: Sequence[BinStatistics]) -> np.ndarray:
     return signature
 
 
+def source_appearance_signature_from_bins(bins: Sequence[BinStatistics]) -> np.ndarray:
+    """Build source-appearance signature (source-only) from aggregated bins."""
+    if len(bins) == 0:
+        return np.zeros(8, dtype=np.float64)
+
+    counts = np.array([b.count for b in bins], dtype=np.float64)
+    src = np.stack([b.mean_input for b in bins], axis=0).astype(np.float64)
+    mu = _weighted_mean(src, counts)
+    std = np.sqrt(_weighted_mean((src - mu) ** 2, counts))
+    lum = 0.2126 * src[:, 0] + 0.7152 * src[:, 1] + 0.0722 * src[:, 2]
+    sat = np.max(src, axis=1) - np.min(src, axis=1)
+    lum_mu = float(np.average(lum, weights=counts))
+    sat_mu = float(np.average(sat, weights=counts))
+    return np.concatenate([mu, std, np.array([lum_mu, sat_mu])], axis=0)
+
+
+def source_appearance_signature_from_image(source: np.ndarray) -> np.ndarray:
+    """Build source-appearance signature directly from image pixels."""
+    rgb = source.reshape(-1, 3).astype(np.float64)
+    if len(rgb) == 0:
+        return np.zeros(8, dtype=np.float64)
+    mu = np.mean(rgb, axis=0)
+    std = np.std(rgb, axis=0)
+    lum = 0.2126 * rgb[:, 0] + 0.7152 * rgb[:, 1] + 0.0722 * rgb[:, 2]
+    sat = np.max(rgb, axis=1) - np.min(rgb, axis=1)
+    return np.concatenate([mu, std, np.array([float(np.mean(lum)), float(np.mean(sat))])], axis=0)
+
+
 def compute_pair_signatures(
     pair_paths: Sequence[tuple[Path | str, Path | str]],
     config: PipelineConfig,
@@ -128,6 +156,7 @@ def compute_pair_signatures(
                 f"Pair {i + 1} has only {len(bins)} occupied bins; cannot cluster reliably."
             )
         sig = pair_signature_from_bins(bins)
+        app_sig = source_appearance_signature_from_bins(bins)
         signatures.append(sig)
         metadata.append(
             {
@@ -138,6 +167,8 @@ def compute_pair_signatures(
                 "transfer_function": meta["transfer_function"].value,
                 "transfer_fn_override": str(tf_override).strip().lower() if tf_override else "",
                 "normalization_mode": norm_diag.mode,
+                "transform_signature": sig.tolist(),
+                "appearance_signature": app_sig.tolist(),
             }
         )
         if progress_callback is not None:

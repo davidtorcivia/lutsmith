@@ -24,6 +24,13 @@ from lutsmith.core.types import (
     TransferFunction,
 )
 from lutsmith.pipeline.batch_manifest import ManifestEntry
+from lutsmith.pipeline.reporting import (
+    build_cluster_assignment_rows,
+    build_cluster_centroid_rows,
+    write_cluster_assignments_csv,
+    write_cluster_centroids_csv,
+)
+from lutsmith.pipeline.routing import ShotFrameEntry, run_shot_routing
 
 
 class PipelineWorker(QThread):
@@ -206,6 +213,8 @@ class BatchPipelineWorker(QThread):
         outlier_sigma: float = 0.0,
         min_pairs_after_outlier: int = 3,
         allow_mixed_transfer: bool = False,
+        export_cluster_artifacts: bool = True,
+        cluster_artifacts_prefix: Optional[Path] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -220,6 +229,8 @@ class BatchPipelineWorker(QThread):
         self._outlier_sigma = outlier_sigma
         self._min_pairs_after_outlier = min_pairs_after_outlier
         self._allow_mixed_transfer = allow_mixed_transfer
+        self._export_cluster_artifacts = export_cluster_artifacts
+        self._cluster_artifacts_prefix = cluster_artifacts_prefix
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -302,6 +313,8 @@ class BatchPipelineWorker(QThread):
                 "clusters": [],
                 "clustering": {},
             }
+            signatures = None
+            signature_meta = None
 
             if mode == "none":
                 result = self._run_job(
@@ -335,13 +348,27 @@ class BatchPipelineWorker(QThread):
                 assignments = np.array(assignments, dtype=np.int64)
                 id_to_label = {v: k for k, v in label_to_id.items()}
                 outputs["clustering"] = {"mode": "manual", "k": len(label_to_id)}
+                if self._export_cluster_artifacts:
+                    self.log_message.emit("Computing pair signatures for cluster artifacts...", "info")
+
+                    def on_sig_progress(fraction: float, message: str):
+                        self.progress_updated.emit("preprocess", fraction, f"cluster: {message}")
+
+                    signatures, signature_meta = compute_pair_signatures(
+                        pairs,
+                        self._config,
+                        progress_callback=on_sig_progress,
+                        cancel_check=lambda: self._cancel_event.is_set(),
+                        pair_transfer_fns=transfer_fns,
+                        pair_normalization_modes=normalizations,
+                    )
             else:
                 self.log_message.emit("Computing pair signatures for auto clustering...", "info")
 
                 def on_sig_progress(fraction: float, message: str):
                     self.progress_updated.emit("preprocess", fraction, f"cluster: {message}")
 
-                signatures, _ = compute_pair_signatures(
+                signatures, signature_meta = compute_pair_signatures(
                     pairs,
                     self._config,
                     progress_callback=on_sig_progress,
@@ -412,8 +439,132 @@ class BatchPipelineWorker(QThread):
                 c_result.diagnostics["cluster_indices"] = [i + 1 for i in idxs]
                 outputs["clusters"].append(c_result)
 
+            if self._export_cluster_artifacts:
+                if signatures is None or signature_meta is None:
+                    signatures, signature_meta = compute_pair_signatures(
+                        pairs,
+                        self._config,
+                        cancel_check=lambda: self._cancel_event.is_set(),
+                        pair_transfer_fns=transfer_fns,
+                        pair_normalization_modes=normalizations,
+                    )
+                if self._config.output_path is None:
+                    raise ValueError("Batch config missing output_path")
+                base = self._cluster_artifacts_prefix or Path(self._config.output_path).with_suffix("")
+                assignments_path = base.parent / f"{base.name}_cluster_assignments.csv"
+                centroids_path = base.parent / f"{base.name}_cluster_centroids.csv"
+                cluster_lut_paths = {}
+                for r in outputs["clusters"]:
+                    lbl = str(r.diagnostics.get("cluster_label", ""))
+                    if lbl and r.output_path is not None:
+                        cluster_lut_paths[lbl] = str(r.output_path)
+                assignment_rows = build_cluster_assignment_rows(
+                    self._entries, assignments, id_to_label, signature_meta=signature_meta
+                )
+                appearance = np.asarray(
+                    [m.get("appearance_signature", [0.0] * 8) for m in signature_meta],
+                    dtype=np.float64,
+                )
+                centroid_rows = build_cluster_centroid_rows(
+                    assignments,
+                    signatures,
+                    appearance,
+                    id_to_label,
+                    cluster_lut_paths=cluster_lut_paths,
+                )
+                write_cluster_assignments_csv(assignment_rows, assignments_path)
+                write_cluster_centroids_csv(centroid_rows, centroids_path)
+                outputs["cluster_artifacts"] = {
+                    "assignments_csv": str(assignments_path),
+                    "centroids_csv": str(centroids_path),
+                }
+                self.log_message.emit(f"Cluster assignments CSV: {assignments_path}", "info")
+                self.log_message.emit(f"Cluster centroids CSV: {centroids_path}", "info")
+
             self.log_message.emit("Batch extraction complete", "success")
             self.finished_ok.emit(outputs)
+        except Exception as e:
+            self.log_message.emit(f"Error: {e}", "error")
+            self.finished_error.emit(str(e))
+
+
+class RoutingWorker(QThread):
+    """Runs shot-to-cluster routing in the background."""
+
+    progress_updated = Signal(str, float, str)
+    log_message = Signal(str, str)
+    finished_ok = Signal(object)
+    finished_error = Signal(str)
+
+    def __init__(
+        self,
+        shot_entries: list[ShotFrameEntry],
+        centroid_rows: list[dict],
+        centroid_appearance: np.ndarray,
+        config: PipelineConfig,
+        output_path: Path,
+        temporal_window: int = 1,
+        switch_penalty: float = 0.0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._shot_entries = shot_entries
+        self._centroid_rows = centroid_rows
+        self._centroid_appearance = np.asarray(centroid_appearance, dtype=np.float64)
+        self._config = config
+        self._output_path = output_path
+        self._temporal_window = temporal_window
+        self._switch_penalty = switch_penalty
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        try:
+            self.log_message.emit(
+                f"Routing started: shots={len(self._shot_entries)}, clusters={len(self._centroid_rows)}",
+                "stage",
+            )
+            self.log_message.emit(
+                f"Temporal window={self._temporal_window}, switch penalty={self._switch_penalty:.3f}",
+                "info",
+            )
+
+            def on_progress(stage: str, fraction: float, message: str):
+                self.progress_updated.emit(stage, fraction, message)
+                if message:
+                    self.log_message.emit(f"[{stage}] {message}", "info")
+
+            result = run_shot_routing(
+                self._shot_entries,
+                self._centroid_rows,
+                self._centroid_appearance,
+                self._config,
+                output_path=self._output_path,
+                temporal_window=self._temporal_window,
+                switch_penalty=self._switch_penalty,
+                progress_callback=on_progress,
+                cancel_check=lambda: self._cancel_event.is_set(),
+            )
+
+            if self._cancel_event.is_set():
+                self.log_message.emit("Routing cancelled", "warning")
+                self.finished_error.emit("Routing cancelled by user.")
+                return
+
+            self.log_message.emit(f"Routing CSV: {result.output_path}", "success")
+            self.log_message.emit(
+                f"Routing complete: shots={len(result.rows)}, switches={result.cluster_switches}",
+                "success",
+            )
+            self.finished_ok.emit(
+                {
+                    "output_path": str(result.output_path) if result.output_path is not None else "",
+                    "rows": result.rows,
+                    "cluster_switches": result.cluster_switches,
+                }
+            )
         except Exception as e:
             self.log_message.emit(f"Error: {e}", "error")
             self.finished_error.emit(str(e))
