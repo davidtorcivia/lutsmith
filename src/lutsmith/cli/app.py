@@ -324,7 +324,7 @@ def extract(
 def extract_batch(
     manifest: Path = typer.Argument(
         ...,
-        help="CSV file with source,target pairs (one pair per line).",
+        help="CSV file with source,target[,weight][,cluster][,transfer_fn][,normalization] rows.",
     ),
     output: Path = typer.Option("output.cube", "-o", "--output", help="Output LUT path."),
     size: int = typer.Option(33, "-s", "--size", help="LUT grid size (17, 33, 65)."),
@@ -442,6 +442,8 @@ def extract_batch(
     pairs = [(entry.source, entry.target) for entry in manifest_entries]
     pair_weights = [entry.weight for entry in manifest_entries]
     manual_clusters = [entry.cluster for entry in manifest_entries]
+    pair_transfer_fns = [entry.transfer_fn for entry in manifest_entries]
+    pair_normalizations = [entry.normalization for entry in manifest_entries]
     config = _build_pipeline_config(
         source=None,
         target=None,
@@ -495,10 +497,13 @@ def extract_batch(
 
     def _run_batch_job(
         job_label: str,
-        job_pairs: list[tuple[Path, Path]],
-        job_weights: list[float],
+        pair_indices: list[int],
         job_config: PipelineConfig,
     ):
+        job_pairs = [pairs[i] for i in pair_indices]
+        job_weights = [pair_weights[i] for i in pair_indices]
+        job_transfer_fns = [pair_transfer_fns[i] for i in pair_indices]
+        job_normalizations = [pair_normalizations[i] for i in pair_indices]
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -513,6 +518,8 @@ def extract_batch(
                 job_config,
                 progress_callback=on_progress,
                 pair_weights=job_weights,
+                pair_transfer_fns=job_transfer_fns,
+                pair_normalization_modes=job_normalizations,
                 pair_balance=pair_balance,
                 outlier_sigma=outlier_sigma,
                 min_pairs_after_outlier=min_pairs_after_outlier,
@@ -525,7 +532,7 @@ def extract_batch(
         master_result = None
         cluster_results = []
         if cluster_mode == "none":
-            master_result = _run_batch_job("master", pairs, pair_weights, config)
+            master_result = _run_batch_job("master", list(range(len(pairs))), config)
             _print_batch_result_summary(master_result, fallback_pairs=len(pairs))
         else:
             # Build assignments for clustered runs.
@@ -551,7 +558,12 @@ def extract_batch(
                 clustering_diag = {"mode": "manual", "k": len(label_to_id)}
             else:
                 console.print("[dim]Computing pair signatures for auto clustering...[/dim]")
-                signatures, _ = compute_pair_signatures(pairs, config)
+                signatures, _ = compute_pair_signatures(
+                    pairs,
+                    config,
+                    pair_transfer_fns=pair_transfer_fns,
+                    pair_normalization_modes=pair_normalizations,
+                )
                 if cluster_count > 0:
                     assignments, clustering_diag = kmeans_cluster_features(
                         signatures, k=cluster_count, random_seed=cluster_seed,
@@ -580,18 +592,16 @@ def extract_batch(
 
             results = []
             if export_master:
-                master_result = _run_batch_job("master", pairs, pair_weights, config)
+                master_result = _run_batch_job("master", list(range(len(pairs))), config)
                 results.append(("master", master_result))
 
             for cid in sorted(groups):
                 idxs = groups[cid]
                 cluster_label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
-                cluster_pairs = [pairs[i] for i in idxs]
-                cluster_weights = [pair_weights[i] for i in idxs]
                 cluster_output = _cluster_output_path(output, cluster_label)
                 cluster_title = f"{title} [{cluster_label}]"
                 cluster_config = replace(config, output_path=cluster_output, title=cluster_title)
-                cluster_result = _run_batch_job(cluster_label, cluster_pairs, cluster_weights, cluster_config)
+                cluster_result = _run_batch_job(cluster_label, idxs, cluster_config)
                 cluster_result.diagnostics["cluster_label"] = cluster_label
                 cluster_result.diagnostics["cluster_indices"] = [i + 1 for i in idxs]
                 cluster_results.append(cluster_result)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable, Optional, Sequence
 from pathlib import Path
 
 import numpy as np
 
-from lutsmith.core.types import BinStatistics, PipelineConfig
+from lutsmith.core.types import BinStatistics, PipelineConfig, TransferFunction
+from lutsmith.pipeline.normalization import apply_pair_normalization
 from lutsmith.pipeline.preprocess import preprocess_pair
 from lutsmith.pipeline.sampling import bin_and_aggregate
 
@@ -86,15 +88,40 @@ def compute_pair_signatures(
     config: PipelineConfig,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    pair_transfer_fns: Optional[Sequence[Optional[str]]] = None,
+    pair_normalization_modes: Optional[Sequence[Optional[str]]] = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """Compute signatures for each pair using preprocessing + bin aggregation."""
+    if pair_transfer_fns is None:
+        pair_transfer_fns = [None] * len(pair_paths)
+    if pair_normalization_modes is None:
+        pair_normalization_modes = [None] * len(pair_paths)
+    if len(pair_transfer_fns) != len(pair_paths):
+        raise ValueError("pair_transfer_fns length must match pair_paths")
+    if len(pair_normalization_modes) != len(pair_paths):
+        raise ValueError("pair_normalization_modes length must match pair_paths")
+
     signatures = []
     metadata = []
-    for i, (source_path, target_path) in enumerate(pair_paths):
+    for i, ((source_path, target_path), tf_override, norm_mode) in enumerate(
+        zip(pair_paths, pair_transfer_fns, pair_normalization_modes)
+    ):
         if cancel_check is not None and cancel_check():
             raise RuntimeError("Cancelled")
 
-        source, target, meta, _ = preprocess_pair(source_path, target_path, config)
+        pair_config = config
+        if tf_override is not None and str(tf_override).strip():
+            tf_text = str(tf_override).strip().lower()
+            try:
+                pair_tf = TransferFunction(tf_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Pair {i + 1} has invalid transfer_fn override '{tf_override}'."
+                ) from exc
+            pair_config = replace(config, transfer_function=pair_tf)
+
+        source, target, meta, _ = preprocess_pair(source_path, target_path, pair_config)
+        source, target, norm_diag = apply_pair_normalization(source, target, norm_mode)
         bins, _ = bin_and_aggregate(source, target, config)
         if len(bins) < 10:
             raise ValueError(
@@ -109,6 +136,8 @@ def compute_pair_signatures(
                 "target": str(target_path),
                 "occupied_bins": len(bins),
                 "transfer_function": meta["transfer_function"].value,
+                "transfer_fn_override": str(tf_override).strip().lower() if tf_override else "",
+                "normalization_mode": norm_diag.mode,
             }
         )
         if progress_callback is not None:

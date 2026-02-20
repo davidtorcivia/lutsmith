@@ -5,6 +5,7 @@ This is the single entry point for both CLI and GUI.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import time
 from pathlib import Path
@@ -19,11 +20,13 @@ from lutsmith.core.types import (
     PipelineConfig,
     PipelineResult,
     ProgressCallback,
+    TransferFunction,
 )
 from lutsmith.errors import PipelineCancelledError, PipelineError
 from lutsmith.io.cube import write_cube
 from lutsmith.pipeline.preprocess import preprocess_pair
 from lutsmith.pipeline.refinement import refine_lut
+from lutsmith.pipeline.normalization import apply_pair_normalization
 from lutsmith.pipeline.sampling import (
     bin_and_aggregate,
     bins_to_samples,
@@ -306,6 +309,8 @@ def run_multi_pipeline(
     progress_callback: Optional[ProgressCallback] = None,
     cancel_check: Optional[CancelCheck] = None,
     pair_weights: Optional[Sequence[float]] = None,
+    pair_transfer_fns: Optional[Sequence[Optional[str]]] = None,
+    pair_normalization_modes: Optional[Sequence[Optional[str]]] = None,
     pair_balance: str = "equal",
     outlier_sigma: float = 0.0,
     min_pairs_after_outlier: int = 3,
@@ -345,20 +350,47 @@ def run_multi_pipeline(
         raise PipelineError(
             f"pair_weights length ({len(pair_weights)}) must match pair_paths length ({len(pair_paths)})"
         )
+    if pair_transfer_fns is None:
+        pair_transfer_fns = [None] * len(pair_paths)
+    if len(pair_transfer_fns) != len(pair_paths):
+        raise PipelineError(
+            f"pair_transfer_fns length ({len(pair_transfer_fns)}) must match pair_paths length ({len(pair_paths)})"
+        )
+    if pair_normalization_modes is None:
+        pair_normalization_modes = [None] * len(pair_paths)
+    if len(pair_normalization_modes) != len(pair_paths):
+        raise PipelineError(
+            f"pair_normalization_modes length ({len(pair_normalization_modes)}) must match pair_paths length ({len(pair_paths)})"
+        )
 
     from lutsmith.pipeline.sampling import (
         bin_and_aggregate,
         detect_spatial_inconsistency,
     )
 
-    for i, ((source_path, target_path), user_weight) in enumerate(zip(pair_paths, pair_weights)):
+    for i, ((source_path, target_path), user_weight, tf_override, norm_mode) in enumerate(
+        zip(pair_paths, pair_weights, pair_transfer_fns, pair_normalization_modes)
+    ):
         _check_cancel(cancel_check)
         pair_idx = i + 1
         weight = float(user_weight)
         if weight < 0:
             raise PipelineError(f"Pair {pair_idx} has negative weight: {weight}")
 
-        source, target, meta, shaper = preprocess_pair(source_path, target_path, config)
+        pair_config = config
+        if tf_override is not None and str(tf_override).strip():
+            tf_text = str(tf_override).strip().lower()
+            try:
+                pair_tf = TransferFunction(tf_text)
+            except ValueError as exc:
+                raise PipelineError(
+                    f"Pair {pair_idx} has invalid transfer_fn override '{tf_override}'. "
+                    "Valid values: auto, linear, log_c3, log_c4, slog3, vlog, unknown."
+                ) from exc
+            pair_config = replace(config, transfer_function=pair_tf)
+
+        source, target, meta, shaper = preprocess_pair(source_path, target_path, pair_config)
+        source, target, norm_diag = apply_pair_normalization(source, target, norm_mode)
         bins, _ = bin_and_aggregate(source, target, config)
 
         if len(bins) < 10:
@@ -400,6 +432,10 @@ def run_multi_pipeline(
             "pixels": int(meta["total_pixels"]),
             "transfer_function": tf_value,
             "shaper_applied": bool(meta.get("shaper_applied", False)),
+            "transfer_fn_override": str(tf_override).strip().lower() if tf_override else "",
+            "normalization_mode": norm_diag.mode,
+            "normalization_gains": norm_diag.gains,
+            "normalization_biases": norm_diag.biases,
         })
 
         progress = pair_idx / len(pair_paths)
@@ -427,6 +463,7 @@ def run_multi_pipeline(
     diagnostics["shaper_applied"] = bool(pair_shaper and pair_shaper.get("applied"))
     diagnostics["shaper_mode"] = pair_shaper.get("mode", "disabled") if pair_shaper else "disabled"
     diagnostics["pair_balance"] = pair_balance
+    diagnostics["normalization_modes"] = sorted(set(rec["normalization_mode"] for rec in pair_records))
 
     logger.info(
         "Preprocess multi-pair: %.2fs, pairs=%d",
@@ -686,7 +723,11 @@ def run_multi_pipeline(
             "height": rec["height"],
             "pixels": rec["pixels"],
             "transfer_function": rec["transfer_function"],
+            "transfer_fn_override": rec["transfer_fn_override"],
             "shaper_applied": rec["shaper_applied"],
+            "normalization_mode": rec["normalization_mode"],
+            "normalization_gains": rec["normalization_gains"],
+            "normalization_biases": rec["normalization_biases"],
             "dropped_as_outlier": rec["index"] in dropped_set,
             "weight_scale": stats.get("weight_scale"),
             "weight_share": stats.get("weight_share"),

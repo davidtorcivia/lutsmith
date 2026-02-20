@@ -98,14 +98,15 @@ Advanced solver options:
 
 ### Extract an aggregate LUT from many matched pairs
 
-Create a manifest CSV with one `source,target[,weight][,cluster]` pair per line:
+Create a manifest CSV with one
+`source,target[,weight][,cluster][,transfer_fn][,normalization]` pair per line:
 
 ```
 # pairs.csv
-source,target,weight,cluster
-restored/frame_0001.png,original/frame_0001.png,1.0,scene_a
-restored/frame_0002.png,original/frame_0002.png,1.0,scene_a
-restored/frame_0003.png,original/frame_0003.png,0.7,scene_b
+source,target,weight,cluster,transfer_fn,normalization
+restored/frame_0001.png,original/frame_0001.png,1.0,scene_a,log_c4,none
+restored/frame_0002.png,original/frame_0002.png,1.0,scene_a,log_c4,luma_affine
+restored/frame_0003.png,original/frame_0003.png,0.7,scene_b,auto,rgb_affine
 ```
 
 Then run:
@@ -124,6 +125,15 @@ Useful robustness controls:
 ```
 
 `extract-batch` uses the same solver options as `extract`, applies pair-aware weighting, and fits from the union of all pair bins. This is more robust than averaging finished LUT cubes.
+
+Per-pair manifest overrides:
+
+```
+  transfer_fn: auto | linear | log_c3 | log_c4 | slog3 | vlog | unknown
+  normalization: none | luma_affine | rgb_affine
+```
+
+Normalization is optional and intended to reduce cross-source drift when frame sets come from mixed scans, transcodes, or exposure pipelines.
 
 Scene-clustered extraction options:
 
@@ -189,7 +199,7 @@ lutsmith-gui
 The GUI provides four tabs:
 
 - **Image Pair** -- Load source/target images, adjust parameters, run extraction, and inspect quality metrics and coverage maps
-- **Batch** -- Load or generate a manifest template, run aggregate extraction, enable manual/auto scene clustering, export master + per-cluster LUTs, and optionally write a metrics CSV summary
+- **Batch** -- Load or generate a manifest template, run aggregate extraction, set per-pair overrides, enable manual/auto scene clustering, export master + per-cluster LUTs, optionally write a metrics CSV summary, and review a sortable batch summary table (dE/coverage/time) with one-click output-folder open
 - **Hald CLUT** -- Generate identity images, load processed results, and reconstruct LUTs
 - **Settings** -- Configure output directory, LUT title, and view I/O backend status
 
@@ -481,8 +491,9 @@ src/lutsmith/
     pipeline/
         preprocess.py        Image loading, sanitization, TF detection
         sampling.py          Pixel binning, Welford stats, weight computation
-        batch_manifest.py    CSV manifest parsing (source/target/weight/cluster)
+        batch_manifest.py    CSV manifest parsing (source/target/weight/cluster/overrides)
         clustering.py        Pair-signature extraction + k-means scene clustering
+        normalization.py     Per-pair normalization (none/luma_affine/rgb_affine)
         reporting.py         Batch metrics table generation + CSV export
         solving.py           Matrix build, baseline/multigrid orchestration
         refinement.py        Optional iterative refit

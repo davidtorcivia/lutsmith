@@ -52,6 +52,32 @@ def test_parse_pair_manifest_with_header_and_weight(tmp_path):
     assert pairs == [ManifestEntry(source=src.resolve(), target=tgt.resolve(), weight=2.5)]
 
 
+def test_parse_pair_manifest_with_transfer_and_normalization(tmp_path):
+    """Manifest parser should accept transfer_fn and normalization columns."""
+    src = tmp_path / "src.png"
+    tgt = tmp_path / "tgt.png"
+    src.write_bytes(b"")
+    tgt.write_bytes(b"")
+
+    manifest = tmp_path / "pairs_full.csv"
+    manifest.write_text(
+        "source,target,weight,cluster,transfer_fn,normalization\n"
+        "src.png,tgt.png,1.0,scene_a,log_c4,rgb_affine\n",
+        encoding="utf-8",
+    )
+
+    entries = _parse_pair_manifest(manifest)
+    assert len(entries) == 1
+    assert entries[0] == ManifestEntry(
+        source=src.resolve(),
+        target=tgt.resolve(),
+        weight=1.0,
+        cluster="scene_a",
+        transfer_fn="log_c4",
+        normalization="rgb_affine",
+    )
+
+
 def test_run_multi_pipeline_succeeds(tmp_image_dir, tmp_path):
     """Multi-pair extraction should produce a LUT and diagnostics."""
     from lutsmith.io.image import save_image
@@ -184,3 +210,39 @@ def test_run_multi_pipeline_outlier_rejection(tmp_image_dir, tmp_path):
     assert outlier_info["enabled"] is True
     assert outlier_info["applied"] is True
     assert len(outlier_info["dropped_pair_indices"]) >= 1
+
+
+def test_run_multi_pipeline_with_pair_overrides(tmp_image_dir, tmp_path):
+    """Per-pair transfer/normalization overrides should flow into diagnostics."""
+    from lutsmith.io.image import save_image
+    from lutsmith.pipeline.runner import run_multi_pipeline
+
+    rng = np.random.default_rng(404)
+    src = rng.random((64, 64, 3), dtype=np.float32)
+    tgt = np.clip(src * 1.06 + 0.015, 0, 1).astype(np.float32)
+
+    src_path = tmp_image_dir / "ov_src.png"
+    tgt_path = tmp_image_dir / "ov_tgt.png"
+    save_image(src, src_path, bit_depth=8)
+    save_image(tgt, tgt_path, bit_depth=8)
+
+    out_path = tmp_path / "override_output.cube"
+    config = PipelineConfig(
+        output_path=out_path,
+        lut_size=5,
+        bin_resolution=8,
+        min_samples_per_bin=2,
+        irls_iterations=1,
+        format=ExportFormat.CUBE,
+    )
+
+    result = run_multi_pipeline(
+        [(src_path, tgt_path)],
+        config,
+        pair_transfer_fns=["auto"],
+        pair_normalization_modes=["rgb_affine"],
+    )
+
+    assert result.output_path == out_path
+    assert result.diagnostics["normalization_modes"] == ["rgb_affine"]
+    assert result.diagnostics["pairs"][0]["normalization_mode"] == "rgb_affine"

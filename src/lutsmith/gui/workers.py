@@ -233,11 +233,19 @@ class BatchPipelineWorker(QThread):
     def _run_job(
         self,
         label: str,
-        pairs: list[tuple[Path, Path]],
-        weights: list[float],
+        pair_indices: list[int],
+        all_pairs: list[tuple[Path, Path]],
+        all_weights: list[float],
+        all_transfer_fns: list[Optional[str]],
+        all_normalizations: list[Optional[str]],
         config: PipelineConfig,
     ):
         from lutsmith.pipeline.runner import run_multi_pipeline
+
+        pairs = [all_pairs[i] for i in pair_indices]
+        weights = [all_weights[i] for i in pair_indices]
+        transfer_fns = [all_transfer_fns[i] for i in pair_indices]
+        normalizations = [all_normalizations[i] for i in pair_indices]
 
         self.log_message.emit(
             f"Running {label}: {len(pairs)} pairs, output={config.output_path}",
@@ -254,6 +262,8 @@ class BatchPipelineWorker(QThread):
             progress_callback=on_progress,
             cancel_check=lambda: self._cancel_event.is_set(),
             pair_weights=weights,
+            pair_transfer_fns=transfer_fns,
+            pair_normalization_modes=normalizations,
             pair_balance=self._pair_balance,
             outlier_sigma=self._outlier_sigma,
             min_pairs_after_outlier=self._min_pairs_after_outlier,
@@ -275,6 +285,8 @@ class BatchPipelineWorker(QThread):
             pairs = [(e.source, e.target) for e in self._entries]
             weights = [float(e.weight) for e in self._entries]
             manual_clusters = [e.cluster for e in self._entries]
+            transfer_fns = [e.transfer_fn for e in self._entries]
+            normalizations = [e.normalization for e in self._entries]
 
             self.log_message.emit(
                 f"Batch extraction started: pairs={len(pairs)}, mode={self._cluster_mode}",
@@ -292,7 +304,15 @@ class BatchPipelineWorker(QThread):
             }
 
             if mode == "none":
-                result = self._run_job("master", pairs, weights, self._config)
+                result = self._run_job(
+                    "master",
+                    list(range(len(pairs))),
+                    pairs,
+                    weights,
+                    transfer_fns,
+                    normalizations,
+                    self._config,
+                )
                 outputs["master"] = result
                 self.log_message.emit("Batch extraction complete", "success")
                 self.finished_ok.emit(outputs)
@@ -326,6 +346,8 @@ class BatchPipelineWorker(QThread):
                     self._config,
                     progress_callback=on_sig_progress,
                     cancel_check=lambda: self._cancel_event.is_set(),
+                    pair_transfer_fns=transfer_fns,
+                    pair_normalization_modes=normalizations,
                 )
                 if self._cluster_count > 0:
                     assignments, diag = kmeans_cluster_features(
@@ -354,15 +376,21 @@ class BatchPipelineWorker(QThread):
                 self.log_message.emit(f"  {label}: {len(groups[cid])} pairs", "info")
 
             if self._export_master:
-                outputs["master"] = self._run_job("master", pairs, weights, self._config)
+                outputs["master"] = self._run_job(
+                    "master",
+                    list(range(len(pairs))),
+                    pairs,
+                    weights,
+                    transfer_fns,
+                    normalizations,
+                    self._config,
+                )
 
             for cid in sorted(groups):
                 if self._cancel_event.is_set():
                     raise RuntimeError("Cancelled")
                 label = id_to_label.get(cid, f"cluster_{cid + 1:02d}")
                 idxs = groups[cid]
-                c_pairs = [pairs[i] for i in idxs]
-                c_weights = [weights[i] for i in idxs]
                 if self._config.output_path is None:
                     raise ValueError("Batch config missing output_path")
                 c_output = self._cluster_output_path(Path(self._config.output_path), label)
@@ -371,7 +399,15 @@ class BatchPipelineWorker(QThread):
                     output_path=c_output,
                     title=f"{self._config.title} [{label}]",
                 )
-                c_result = self._run_job(label, c_pairs, c_weights, c_config)
+                c_result = self._run_job(
+                    label,
+                    idxs,
+                    pairs,
+                    weights,
+                    transfer_fns,
+                    normalizations,
+                    c_config,
+                )
                 c_result.diagnostics["cluster_label"] = label
                 c_result.diagnostics["cluster_indices"] = [i + 1 for i in idxs]
                 outputs["clusters"].append(c_result)

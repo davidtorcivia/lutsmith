@@ -8,8 +8,8 @@ import re
 from typing import Optional
 
 try:
-    from PySide6.QtCore import Qt, Slot, QSettings
-    from PySide6.QtGui import QAction
+    from PySide6.QtCore import Qt, Slot, QSettings, QUrl
+    from PySide6.QtGui import QAction, QDesktopServices
     from PySide6.QtWidgets import (
         QMainWindow, QTabWidget, QWidget,
         QVBoxLayout, QHBoxLayout, QSplitter,
@@ -17,6 +17,7 @@ try:
         QPushButton, QLabel, QGroupBox,
         QFormLayout, QLineEdit, QSpinBox,
         QComboBox, QCheckBox, QScrollArea, QFrame, QDoubleSpinBox,
+        QTableWidget, QTableWidgetItem, QHeaderView,
     )
 except ImportError:
     raise ImportError("PySide6 is required for the GUI.")
@@ -186,7 +187,9 @@ class MainWindow(QMainWindow):
 
         manifest_row = QHBoxLayout()
         self._batch_manifest_path = QLineEdit()
-        self._batch_manifest_path.setPlaceholderText("pairs.csv (source,target[,weight][,cluster])")
+        self._batch_manifest_path.setPlaceholderText(
+            "pairs.csv (source,target[,weight][,cluster][,transfer_fn][,normalization])"
+        )
         manifest_row.addWidget(self._batch_manifest_path, 1)
         self._btn_browse_batch_manifest = QPushButton("Browse...")
         self._btn_browse_batch_manifest.setFixedWidth(80)
@@ -197,7 +200,7 @@ class MainWindow(QMainWindow):
         manifest_form.addRow("Manifest:", manifest_row)
 
         self._batch_manifest_hint = QLabel(
-            "Use one CSV line per pair. Optional columns: weight and manual cluster label."
+            "Use one CSV line per pair. Optional columns: weight, cluster, transfer_fn, normalization."
         )
         self._batch_manifest_hint.setWordWrap(True)
         self._batch_manifest_hint.setStyleSheet(f"color: {PALETTE.text_secondary}; font-size: 11px;")
@@ -296,6 +299,35 @@ class MainWindow(QMainWindow):
 
         self._batch_metrics = MetricsDisplay()
         layout.addWidget(self._batch_metrics)
+
+        summary_group = QGroupBox("Batch Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setSpacing(SPACING_SM)
+
+        self._batch_summary_table = QTableWidget(0, 6)
+        self._batch_summary_table.setHorizontalHeaderLabels(
+            ["Label", "Mean dE", "Coverage %", "Time (s)", "Pairs", "Output"]
+        )
+        self._batch_summary_table.setSortingEnabled(True)
+        self._batch_summary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._batch_summary_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._batch_summary_table.verticalHeader().setVisible(False)
+        header = self._batch_summary_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        summary_layout.addWidget(self._batch_summary_table)
+
+        summary_btn_row = QHBoxLayout()
+        summary_btn_row.addStretch()
+        self._btn_open_batch_output_folder = QPushButton("Open Output Folder")
+        self._btn_open_batch_output_folder.setEnabled(False)
+        summary_btn_row.addWidget(self._btn_open_batch_output_folder)
+        summary_layout.addLayout(summary_btn_row)
+        layout.addWidget(summary_group)
 
         self._batch_log = LogViewer()
         layout.addWidget(self._batch_log, 1)
@@ -488,6 +520,8 @@ class MainWindow(QMainWindow):
         self._btn_batch_cancel.clicked.connect(self._cancel_batch_extraction)
         self._batch_cluster_mode.currentTextChanged.connect(self._update_batch_cluster_controls)
         self._batch_export_metrics_csv.stateChanged.connect(self._update_batch_metrics_controls)
+        self._batch_summary_table.itemSelectionChanged.connect(self._update_batch_output_folder_button)
+        self._btn_open_batch_output_folder.clicked.connect(self._open_selected_batch_output_folder)
 
     # ------------------------------------------------------------------
     # Image loading
@@ -726,10 +760,10 @@ class MainWindow(QMainWindow):
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         template = (
-            "source,target,weight,cluster\n"
-            "restored/frame_0001.png,original/frame_0001.png,1.0,scene_a\n"
-            "restored/frame_0002.png,original/frame_0002.png,1.0,scene_a\n"
-            "restored/frame_0003.png,original/frame_0003.png,0.8,scene_b\n"
+            "source,target,weight,cluster,transfer_fn,normalization\n"
+            "restored/frame_0001.png,original/frame_0001.png,1.0,scene_a,log_c4,none\n"
+            "restored/frame_0002.png,original/frame_0002.png,1.0,scene_a,log_c4,luma_affine\n"
+            "restored/frame_0003.png,original/frame_0003.png,0.8,scene_b,auto,rgb_affine\n"
         )
         out.write_text(template, encoding="utf-8")
         self._settings.setValue("last_output_dir", str(out.parent))
@@ -794,6 +828,8 @@ class MainWindow(QMainWindow):
         self._batch_log.append(f"Cluster mode: {mode}", "info")
         self._batch_progress.reset()
         self._batch_metrics.clear()
+        self._batch_summary_table.setRowCount(0)
+        self._update_batch_output_folder_button()
 
         self._btn_batch_extract.setEnabled(False)
         self._btn_batch_cancel.setEnabled(True)
@@ -835,11 +871,81 @@ class MainWindow(QMainWindow):
     def _on_batch_log(self, message: str, severity: str):
         self._batch_log.append(message, severity)
 
+    def _populate_batch_summary_table(self, master, clusters: list):
+        rows = build_batch_metrics_rows(master, clusters)
+        self._batch_summary_table.setSortingEnabled(False)
+        self._batch_summary_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            label_item = QTableWidgetItem(row.get("label", ""))
+            self._batch_summary_table.setItem(r, 0, label_item)
+
+            mean_text = row.get("mean_de2000", "")
+            mean_item = QTableWidgetItem(mean_text)
+            try:
+                mean_item.setData(Qt.ItemDataRole.UserRole, float(mean_text))
+            except Exception:
+                pass
+            self._batch_summary_table.setItem(r, 1, mean_item)
+
+            cov_text = row.get("coverage_pct", "")
+            cov_item = QTableWidgetItem(cov_text)
+            try:
+                cov_item.setData(Qt.ItemDataRole.UserRole, float(cov_text))
+            except Exception:
+                pass
+            self._batch_summary_table.setItem(r, 2, cov_item)
+
+            time_text = row.get("total_time_s", "")
+            time_item = QTableWidgetItem(time_text)
+            try:
+                time_item.setData(Qt.ItemDataRole.UserRole, float(time_text))
+            except Exception:
+                pass
+            self._batch_summary_table.setItem(r, 3, time_item)
+
+            pairs_item = QTableWidgetItem(row.get("num_pairs_used", "") or row.get("num_pairs", ""))
+            self._batch_summary_table.setItem(r, 4, pairs_item)
+
+            output_path = row.get("output_path", "")
+            output_item = QTableWidgetItem(output_path)
+            output_item.setData(Qt.ItemDataRole.UserRole, output_path)
+            self._batch_summary_table.setItem(r, 5, output_item)
+
+        self._batch_summary_table.setSortingEnabled(True)
+        if rows:
+            self._batch_summary_table.selectRow(0)
+        self._update_batch_output_folder_button()
+
+    def _selected_batch_output_path(self) -> Optional[Path]:
+        row = self._batch_summary_table.currentRow()
+        if row < 0:
+            return None
+        item = self._batch_summary_table.item(row, 5)
+        if item is None:
+            return None
+        path_text = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        if not path_text:
+            return None
+        return Path(str(path_text))
+
+    def _update_batch_output_folder_button(self):
+        selected = self._selected_batch_output_path()
+        self._btn_open_batch_output_folder.setEnabled(selected is not None)
+
+    @Slot()
+    def _open_selected_batch_output_folder(self):
+        selected = self._selected_batch_output_path()
+        if selected is None:
+            return
+        folder = selected.parent if selected.suffix else selected
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+
     @Slot(object)
     def _on_batch_done(self, payload: dict):
         self._batch_progress.set_complete()
         master = payload.get("master")
         clusters = payload.get("clusters", [])
+        self._populate_batch_summary_table(master, clusters)
 
         chosen = master
         if chosen is None and clusters:
@@ -881,6 +987,7 @@ class MainWindow(QMainWindow):
     def _on_batch_error(self, error_msg: str):
         self._batch_progress.set_error("solving", error_msg[:40])
         self._status_label.setText("Batch error")
+        self._update_batch_output_folder_button()
         QMessageBox.warning(self, "Batch Pipeline Error", error_msg)
 
     @Slot()
